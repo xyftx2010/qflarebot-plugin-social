@@ -14,6 +14,7 @@ import { listMultimodalStats } from '../store/multimodal-db.js'
 import { addGroupMemory, resolveMemoryTtlDays } from '../memory/store.js'
 import { listAllPersonas, resolvePersona, syncPersonaToAgent } from '../persona/manager.js'
 import { deleteMemeAsset, getMemeById, searchMemesByQuery, updateMemeRecord } from '../meme/store.js'
+import { generateTestToneWav } from '../voice/probe.js'
 import { ADMIN_PAGE_HTML } from './page.js'
 
 function jsonError(status: number, error: string): Response {
@@ -49,6 +50,20 @@ function parseOptionalNumber(value: unknown, min: number, max: number): number |
 
 export function createAdminRoutes(): Route<SocialConfig>[] {
   return [
+    // Phase 1 语音发送可行性测试音频路由（公开只读 1 秒 440Hz WAV 提示音）
+    {
+      method: 'GET',
+      path: '/voice-test/sample.wav',
+      auth: 'public',
+      handler: () =>
+        new Response(generateTestToneWav(1000), {
+          status: 200,
+          headers: {
+            'content-type': 'audio/wav',
+            'cache-control': 'public, max-age=3600',
+          },
+        }),
+    },
     // 公开路由：供 QQ 平台拉取 R2 中已授权收藏的表情包原图（流式返回，零 base64 内存开销）
     {
       method: 'GET',

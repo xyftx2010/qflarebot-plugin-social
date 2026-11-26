@@ -27,6 +27,7 @@ import {
 import { handleGroupChatEvent } from './chat/pipeline.js'
 import { createSocialService, createSocialTools } from './chat/tools.js'
 import { createAdminRoutes } from './admin/routes.js'
+import { generateTestToneWavBase64 } from './voice/probe.js'
 
 const HELP_TEXT = [
   '拟人群聊（social v0.5.0）命令：',
@@ -365,6 +366,64 @@ export default definePlugin<SocialConfig>({
           return `${i + 1}. ${scopeTag} ${m.meaning}（${m.mood}｜${m.tags.slice(0, 3).join('、') || '无标签'}）\n   id: ${m.id}`
         })
         return ['可用表情包（最多展示 12 条）：', ...lines].join('\n')
+      },
+    },
+
+    'social voicetest': {
+      aliases: ['语音测试'],
+      description: '测试QQ原生语音发送',
+      usage: '/social voicetest <wav-b64|wav-url|url <音频URL>>',
+      permission: 'group_admin',
+      scenes: ['group'],
+      async handler({ session, ctx, args }) {
+        const mode = (args[0] ?? 'wav-b64').toLowerCase()
+        let media: { type: 'voice'; url?: string; base64?: string; filename?: string }
+
+        if (mode === 'wav-b64') {
+          media = {
+            type: 'voice',
+            base64: generateTestToneWavBase64(1000),
+            filename: 'test.wav',
+          }
+        } else if (mode === 'wav-url') {
+          if (!ctx.publicUrl) {
+            return '当前无法获取 ctx.publicUrl，请在面板「设置 → 运行 → 机器人公开地址」填写后再测试 wav-url。'
+          }
+          media = {
+            type: 'voice',
+            url: `${ctx.publicUrl}/p/${ctx.plugin.name}/voice-test/sample.wav`,
+            filename: 'test.wav',
+          }
+        } else if (mode === 'url') {
+          const rawUrl = (args[1] ?? '').trim()
+          if (!/^https?:\/\//i.test(rawUrl)) {
+            return '用法：/social voicetest url <https://音频地址>'
+          }
+          const ext = rawUrl.match(/\.(silk|mp3|wav|ogg|amr)(?:[?#]|$)/i)?.[1]?.toLowerCase() ?? 'silk'
+          media = {
+            type: 'voice',
+            url: rawUrl,
+            filename: `test.${ext}`,
+          }
+        } else {
+          return '用法：/social voicetest <wav-b64 | wav-url | url <https://音频地址>>'
+        }
+
+        const res = await session.reply({ media })
+        if (res.ok) {
+          return [
+            `【语音发送回执：成功 (${mode})】`,
+            `- messageId：${res.messageId ?? '(无)'}`,
+            `- 请在手机 QQ 确认是否为原生语音条且可正常播放。`,
+          ].join('\n')
+        }
+        return [
+          `【语音发送回执：失败 (${mode})】`,
+          `- HTTP status：${res.status}`,
+          `- QQ code：${res.code ?? '(无)'}`,
+          `- error：${res.error ?? '(无)'}`,
+          `- traceId：${res.traceId ?? '(无)'}`,
+        ].join('\n')
       },
     },
 

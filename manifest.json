@@ -112,6 +112,18 @@
       ]
     },
     {
+      "name": "social voicetest",
+      "aliases": [
+        "语音测试"
+      ],
+      "description": "测试QQ原生语音发送",
+      "usage": "/social voicetest <wav-b64|wav-url|url <音频URL>>",
+      "permission": "group_admin",
+      "scenes": [
+        "group"
+      ]
+    },
+    {
       "name": "social sync",
       "aliases": [
         "同步人格"
@@ -139,6 +151,11 @@
   "buttons": [],
   "cron": [],
   "routes": [
+    {
+      "method": "GET",
+      "path": "/voice-test/sample.wav",
+      "auth": "public"
+    },
     {
       "method": "GET",
       "path": "/meme/:id",
