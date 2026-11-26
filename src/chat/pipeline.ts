@@ -373,6 +373,7 @@ export async function handleGroupChatEvent(
       ctx.config.use_global_meme_library,
       now,
       60,
+      ctx.config.share_memes_across_groups,
     )
     const memeDecision = selectMemeForReply({
       config: ctx.config,

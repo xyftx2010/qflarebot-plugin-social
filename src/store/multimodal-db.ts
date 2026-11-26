@@ -197,20 +197,22 @@ export async function pruneExpiredImageCache(db: ScopedDB, now = Date.now()): Pr
 export async function findMemeByHash(
   db: ScopedDB,
   hash: string,
-  scope: MemeScope,
+  scope: MemeScope | 'any',
   groupId: string | null,
 ): Promise<MemeRecord | null> {
   const row =
-    scope === 'global'
-      ? await db.first<MemeRow>(
-          `SELECT * FROM {memes} WHERE hash = ? AND scope = 'global' LIMIT 1`,
-          hash,
-        )
-      : await db.first<MemeRow>(
-          `SELECT * FROM {memes} WHERE hash = ? AND scope = 'group' AND group_id = ? LIMIT 1`,
-          hash,
-          groupId,
-        )
+    scope === 'any'
+      ? await db.first<MemeRow>('SELECT * FROM {memes} WHERE hash = ? LIMIT 1', hash)
+      : scope === 'global'
+        ? await db.first<MemeRow>(
+            `SELECT * FROM {memes} WHERE hash = ? AND scope = 'global' LIMIT 1`,
+            hash,
+          )
+        : await db.first<MemeRow>(
+            `SELECT * FROM {memes} WHERE hash = ? AND scope = 'group' AND group_id = ? LIMIT 1`,
+            hash,
+            groupId,
+          )
   return row ? mapMemeRow(row) : null
 }
 
@@ -247,35 +249,45 @@ export async function insertMemeRecord(db: ScopedDB, meme: MemeRecord): Promise<
   )
 }
 
-/** 查询当前群可用于回复的活跃表情包（严格群级隔离：只返回本群 + 可选全局） */
+/** 查询当前群可用于回复的活跃表情包（支持跨群共享或群级隔离） */
 export async function listAvailableMemesForGroup(
   db: ScopedDB,
   groupId: string,
   includeGlobal: boolean,
   now = Date.now(),
   limit = 80,
+  shareAcrossGroups = false,
 ): Promise<MemeRecord[]> {
-  const rows = includeGlobal
+  const rows = shareAcrossGroups
     ? await db.all<MemeRow>(
         `SELECT * FROM {memes}
          WHERE enabled = 1 AND expires_at > ?
-           AND ((scope = 'group' AND group_id = ?) OR scope = 'global')
          ORDER BY use_count DESC, created_at DESC
          LIMIT ?`,
         now,
-        groupId,
         limit,
       )
-    : await db.all<MemeRow>(
-        `SELECT * FROM {memes}
-         WHERE enabled = 1 AND expires_at > ?
-           AND scope = 'group' AND group_id = ?
-         ORDER BY use_count DESC, created_at DESC
-         LIMIT ?`,
-        now,
-        groupId,
-        limit,
-      )
+    : includeGlobal
+      ? await db.all<MemeRow>(
+          `SELECT * FROM {memes}
+           WHERE enabled = 1 AND expires_at > ?
+             AND ((scope = 'group' AND group_id = ?) OR scope = 'global')
+           ORDER BY use_count DESC, created_at DESC
+           LIMIT ?`,
+          now,
+          groupId,
+          limit,
+        )
+      : await db.all<MemeRow>(
+          `SELECT * FROM {memes}
+           WHERE enabled = 1 AND expires_at > ?
+             AND scope = 'group' AND group_id = ?
+           ORDER BY use_count DESC, created_at DESC
+           LIMIT ?`,
+          now,
+          groupId,
+          limit,
+        )
   return rows.map(mapMemeRow)
 }
 

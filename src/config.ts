@@ -36,6 +36,7 @@ export const defaultConfig: SocialConfig = {
   meme_repeat_cooldown_seconds: 180,
   max_consecutive_memes: 2,
   meme_ttl_days: 90,
+  share_memes_across_groups: true,
   use_global_meme_library: true,
 }
 
@@ -278,10 +279,17 @@ export const configSchema: JsonSchema = {
       maximum: 365,
       default: 90,
     },
+    share_memes_across_groups: {
+      type: 'boolean',
+      title: '跨群共享表情包库（不按群隔离）',
+      description: '默认开启：在任意群收藏的表情包所有群通用；关闭后恢复按群独立隔离（记忆与上下文仍保持严格群隔离）。',
+      default: true,
+      'x-showIf': { enable_meme_reply: true },
+    },
     use_global_meme_library: {
       type: 'boolean',
       title: '群聊复用全局素材库',
-      description: '开启后除本群独立素材库外，也可匹配全局素材库中的已启用表情包。',
+      description: '仅在关闭「跨群共享表情包库」时生效，控制是否同时匹配全局素材库。',
       default: true,
       'x-showIf': { enable_meme_reply: true },
     },

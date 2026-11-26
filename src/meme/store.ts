@@ -60,7 +60,10 @@ function parseExtraTokens(raw: string): { category: string; tags: string[]; note
   }
 }
 
-export function parseCollectCommandArgs(argText: string): {
+export function parseCollectCommandArgs(
+  argText: string,
+  defaultScope: MemeScope = 'global',
+): {
   scope: MemeScope
   category: string
   extraTags: string[]
@@ -68,9 +71,10 @@ export function parseCollectCommandArgs(argText: string): {
 } {
   const trimmed = argText.trim()
   const isGlobal = /(?:^|\s)(?:global|全局)(?=\s|$)/i.test(trimmed)
+  const isGroup = /(?:^|\s)(?:group|本群)(?=\s|$)/i.test(trimmed)
   const parsed = parseExtraTokens(trimmed)
   return {
-    scope: isGlobal ? 'global' : 'group',
+    scope: isGlobal ? 'global' : isGroup ? 'group' : defaultScope,
     category: parsed.category,
     extraTags: parsed.tags,
     note: parsed.note,
@@ -107,13 +111,14 @@ export async function collectMemeFromSession(
   }
 
   const groupId = opts.scope === 'group' ? session.targetId : null
-  const existing = await findMemeByHash(ctx.db, dl.image.hash, opts.scope, groupId)
+  const dedupScope = ctx.config.share_memes_across_groups ? 'any' : opts.scope
+  const existing = await findMemeByHash(ctx.db, dl.image.hash, dedupScope, groupId)
   if (existing) {
     return {
       ok: false,
       duplicate: true,
       existing,
-      reason: `这张表情包已经在${opts.scope === 'global' ? '全局' : '本群'}素材库中了（ID: ${existing.id}）。`,
+      reason: `这张表情包已经在${ctx.config.share_memes_across_groups ? '共享' : opts.scope === 'global' ? '全局' : '本群'}素材库中了（ID: ${existing.id}）。`,
     }
   }
 

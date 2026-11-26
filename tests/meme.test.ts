@@ -92,11 +92,15 @@ describe('meme library: hash dedup, R2+D1 CRUD, group isolation, semantic matchi
     expect(dup.ok).toBe(false)
     if (!dup.ok) expect(dup.duplicate).toBe(true)
 
-    // 群级隔离：group-B 查不到 group-A 的独立表情包
-    const memesA = await listAvailableMemesForGroup(ctx.db, 'group-A', true, 1_002_000)
-    const memesB = await listAvailableMemesForGroup(ctx.db, 'group-B', true, 1_002_000)
-    expect(memesA).toHaveLength(1)
-    expect(memesB).toHaveLength(0)
+    // 默认跨群共享模式：group-B 也能直接使用 group-A 收藏的表情包
+    const sharedB = await listAvailableMemesForGroup(ctx.db, 'group-B', true, 1_002_000, 80, true)
+    expect(sharedB).toHaveLength(1)
+
+    // 关闭跨群共享时，仍支持按群严格隔离
+    const isolatedA = await listAvailableMemesForGroup(ctx.db, 'group-A', true, 1_002_000, 80, false)
+    const isolatedB = await listAvailableMemesForGroup(ctx.db, 'group-B', true, 1_002_000, 80, false)
+    expect(isolatedA).toHaveLength(1)
+    expect(isolatedB).toHaveLength(0)
 
     // 删除表情包应同步删除 D1 记录和 R2 对象
     const del = await deleteMemeAsset(ctx, first.meme.id, 'group-A')

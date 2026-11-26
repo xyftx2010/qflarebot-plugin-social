@@ -160,7 +160,9 @@ export interface SocialConfig {
   max_consecutive_memes: number
   /** 收藏的表情包资源保存天数（1 ~ 365） */
   meme_ttl_days: number
-  /** 是否允许群聊回复使用全局素材库（除本群独立素材库外） */
+  /** 是否跨群共享全部表情包素材库（默认开启：所有群共用同一套表情包库） */
+  share_memes_across_groups: boolean
+  /** 兼容项：是否允许群聊回复使用全局素材库 */
   use_global_meme_library: boolean
 }
 

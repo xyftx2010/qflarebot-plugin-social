@@ -97,7 +97,14 @@ export default definePlugin<SocialConfig>({
           getGroupSettings(ctx.db, groupId),
           getGroupState(ctx.db, groupId),
           listActiveGroupMemories(ctx.db, groupId, now, 60),
-          listAvailableMemesForGroup(ctx.db, groupId, ctx.config.use_global_meme_library, now, 100),
+          listAvailableMemesForGroup(
+            ctx.db,
+            groupId,
+            ctx.config.use_global_meme_library,
+            now,
+            100,
+            ctx.config.share_memes_across_groups,
+          ),
           listMultimodalStats(ctx.db, 1),
         ])
         const mode = resolveEffectiveMode(ctx.config, settings)
@@ -286,15 +293,16 @@ export default definePlugin<SocialConfig>({
     'social collect': {
       aliases: ['收藏表情'],
       description: '收藏当前或引用表情包',
-      usage: '/social collect [标签] [分类:xxx] [global]',
+      usage: '/social collect [标签] [分类:xxx]',
       scenes: ['group'],
       async handler({ session, ctx, argText }) {
-        const parsed = parseCollectCommandArgs(argText)
-        if (parsed.scope === 'global' && !meetsPermission(session, 'group_admin')) {
+        const defaultScope = ctx.config.share_memes_across_groups ? 'global' : 'group'
+        const parsed = parseCollectCommandArgs(argText, defaultScope)
+        if (!ctx.config.share_memes_across_groups && parsed.scope === 'global' && !meetsPermission(session, 'group_admin')) {
           return '只有群管理员或 Bot 管理员才能将表情包收藏到全局素材库。'
         }
         const res = await collectMemeFromSession(session, ctx, {
-          scope: parsed.scope,
+          scope: ctx.config.share_memes_across_groups ? 'global' : parsed.scope,
           category: parsed.category,
           extraTags: parsed.extraTags,
           note: parsed.note,
@@ -302,7 +310,7 @@ export default definePlugin<SocialConfig>({
         if (!res.ok) return res.reason
         const tagLine = res.meme.tags.length ? res.meme.tags.join('、') : '无'
         return [
-          `已收藏到${res.meme.scope === 'global' ? '全局' : '本群'}表情包库！`,
+          `已收藏到${ctx.config.share_memes_across_groups ? '共享' : res.meme.scope === 'global' ? '全局' : '本群'}表情包库！`,
           `- ID：${res.meme.id}`,
           `- 含义：${res.meme.meaning}`,
           `- 情绪：${res.meme.mood}｜标签：${tagLine}`,
@@ -313,7 +321,7 @@ export default definePlugin<SocialConfig>({
 
     'social memes': {
       aliases: ['表情库'],
-      description: '查看管理本群表情库',
+      description: '查看管理表情包库',
       usage: '/social memes [关键词|disable <id>|enable <id>|del <id>]',
       scenes: ['group'],
       async handler({ session, ctx, argText }) {
@@ -323,10 +331,11 @@ export default definePlugin<SocialConfig>({
         const [sub = '', ...rest] = trimmed ? trimmed.split(/\s+/) : ['']
 
         if (sub === 'del' || sub === 'delete' || sub === '删除') {
-          if (!meetsPermission(session, 'group_admin')) return '只有群管理员或 Bot 管理员可以删除本群表情包。'
+          if (!meetsPermission(session, 'group_admin')) return '只有群管理员或 Bot 管理员可以删除表情包。'
           const id = rest[0]?.trim()
           if (!id) return '用法：/social memes del <表情包ID>'
-          const res = await deleteMemeAsset(ctx, id, session.isBotAdmin ? undefined : groupId)
+          const restrictGroup = ctx.config.share_memes_across_groups || session.isBotAdmin ? undefined : groupId
+          const res = await deleteMemeAsset(ctx, id, restrictGroup)
           return res.deleted ? `已删除表情包 ${id}（同步清理 R2 原图）。` : (res.reason ?? '删除失败')
         }
 
@@ -341,8 +350,8 @@ export default definePlugin<SocialConfig>({
 
         const query = sub === 'list' || sub === '列表' ? rest.join(' ') : trimmed
         const list = await searchMemesByQuery(ctx, query, {
-          scope: ctx.config.use_global_meme_library ? 'all' : 'group',
-          groupId,
+          scope: ctx.config.share_memes_across_groups || ctx.config.use_global_meme_library ? 'all' : 'group',
+          groupId: ctx.config.share_memes_across_groups ? undefined : groupId,
           includeDisabled: false,
           limit: 12,
         })
