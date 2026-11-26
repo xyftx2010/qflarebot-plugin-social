@@ -1,0 +1,26 @@
+{
+  "name": "qflarebot-plugin-social",
+  "version": "0.1.0",
+  "description": "QFlareBot 拟人化 QQ 群聊娱乐互动插件：自然对话、人格设定、滑窗上下文、智能触发、冷却控制与群级隔离记忆",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "qflarebot-plugin",
+    "qqbot",
+    "social",
+    "chat"
+  ],
+  "scripts": {
+    "build": "qqbot-plugin build",
+    "sync": "qqbot-plugin build && node -e \"require('node:fs').copyFileSync('dist/manifest.json','manifest.json')\"",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@qqbot/plugin-cli": "file:../QFlareBot/packages/plugin-cli",
+    "@qqbot/sdk": "file:../QFlareBot/packages/sdk",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
