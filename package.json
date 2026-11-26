@@ -1,7 +1,7 @@
 {
   "name": "qflarebot-plugin-social",
-  "version": "0.1.0",
-  "description": "QFlareBot 拟人化 QQ 群聊娱乐互动插件：自然对话、人格设定、滑窗上下文、智能触发、冷却控制与群级隔离记忆",
+  "version": "0.5.0",
+  "description": "QFlareBot 多模态拟人 QQ 群聊娱乐互动插件：自然对话、图片理解、表情包素材库、智能接梗与群级隔离记忆",
   "license": "MIT",
   "type": "module",
   "keywords": [

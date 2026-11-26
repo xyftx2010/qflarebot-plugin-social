@@ -3,6 +3,7 @@ import type { SocialConfig } from './types.js'
 
 export const defaultConfig: SocialConfig = {
   model_alias: '',
+  vision_model_alias: '',
   default_mode: 'auto',
   default_persona: 'lively',
   yield_at_to_agent: true,
@@ -17,10 +18,25 @@ export const defaultConfig: SocialConfig = {
   memory_ttl_days: 30,
   max_memories_per_group: 60,
   llm_timeout_ms: 14_000,
-  max_output_tokens: 220,
+  max_output_tokens: 150,
   temperature: 0.85,
   blocked_keywords: '',
   custom_personas: [],
+
+  // V0.5.0 多模态默认值
+  enable_vision: true,
+  vision_rate_limit_per_minute: 4,
+  max_vision_images: 2,
+  max_image_bytes: 800_000,
+  image_cache_ttl_hours: 72,
+  vision_timeout_ms: 10_000,
+
+  enable_meme_reply: true,
+  meme_send_probability: 0.35,
+  meme_repeat_cooldown_seconds: 180,
+  max_consecutive_memes: 2,
+  meme_ttl_days: 90,
+  use_global_meme_library: true,
 }
 
 export const configSchema: JsonSchema = {
@@ -28,8 +44,14 @@ export const configSchema: JsonSchema = {
   properties: {
     model_alias: {
       type: 'string',
-      title: '模型别名',
+      title: '对话模型别名',
       description: '填写「LLM 接口」插件里的模型别名；留空使用全局默认模型。',
+      default: '',
+    },
+    vision_model_alias: {
+      type: 'string',
+      title: '视觉模型别名（Vision）',
+      description: '独立视觉模型别名（需在 LLM 接口开启 image 能力）；留空时回退到对话模型别名。',
       default: '',
     },
     default_mode: {
@@ -63,7 +85,7 @@ export const configSchema: JsonSchema = {
     base_reply_probability: {
       type: 'number',
       title: '基础插话概率',
-      description: '普通非 @ 群聊中的基础随机插话权重（0 到 1，建议 0.1 ~ 0.25）。',
+      description: '普通非 @ 群聊中的基础随机插话权重（0 到 1，建议 0.15 ~ 0.35）。',
       minimum: 0,
       maximum: 1,
       default: 0.18,
@@ -95,7 +117,7 @@ export const configSchema: JsonSchema = {
     max_context_messages: {
       type: 'integer',
       title: '短期上下文最大条数',
-      description: '每群滑窗保留的近期消息条数（建议 10 ~ 24）。',
+      description: '每群滑窗保留的近期消息条数（建议 8 ~ 20）。',
       minimum: 4,
       maximum: 40,
       default: 16,
@@ -132,8 +154,8 @@ export const configSchema: JsonSchema = {
     },
     llm_timeout_ms: {
       type: 'integer',
-      title: '模型调用超时（毫秒）',
-      description: 'QQ 单事件总预算 30 秒，建议控制在 12000 ~ 16000 毫秒内。',
+      title: '对话模型调用超时（毫秒）',
+      description: 'QQ 单事件总预算 30 秒，建议控制在 10000 ~ 15000 毫秒内。',
       minimum: 3000,
       maximum: 22000,
       default: 14000,
@@ -141,10 +163,10 @@ export const configSchema: JsonSchema = {
     max_output_tokens: {
       type: 'integer',
       title: '单次回复最大 Token',
-      description: '控制群聊回复简短自然，避免长篇大论。',
+      description: '控制群聊回复简短自然，建议 90 ~ 160。',
       minimum: 32,
       maximum: 1024,
-      default: 220,
+      default: 150,
     },
     temperature: {
       type: 'number',
@@ -160,6 +182,110 @@ export const configSchema: JsonSchema = {
       description: '逗号分隔；入站命中则不触发，出站命中则拦截不发。',
       default: '',
     },
+
+    // ---- V0.5.0 多模态：图片理解 ----
+    enable_vision: {
+      type: 'boolean',
+      title: '启用图片理解（Vision）',
+      description: '仅在触发回复或主动收藏表情包时按需调用视觉模型，不对所有群图无条件调用。',
+      default: true,
+    },
+    vision_rate_limit_per_minute: {
+      type: 'integer',
+      title: '每群每分钟图片理解上限',
+      description: '超过频控自动降级为纯文本理解，防止群内刷图消耗额度（0 = 不限）。',
+      minimum: 0,
+      maximum: 30,
+      default: 4,
+      'x-showIf': { enable_vision: true },
+    },
+    max_vision_images: {
+      type: 'integer',
+      title: '单次最多解析图片数',
+      description: '限制单条消息（含引用）一次处理的图片数量，控制 Worker 内存与耗时。',
+      minimum: 1,
+      maximum: 3,
+      default: 2,
+      'x-showIf': { enable_vision: true },
+    },
+    max_image_bytes: {
+      type: 'integer',
+      title: '单张图片体积上限（字节）',
+      description: '默认 800000（约 800 KB），避免超大图触发 Worker 10ms CPU 或内存上限。',
+      minimum: 50000,
+      maximum: 2000000,
+      default: 800000,
+      'x-showIf': { enable_vision: true },
+    },
+    image_cache_ttl_hours: {
+      type: 'integer',
+      title: '图片理解结果缓存（小时）',
+      description: '相同图片按 SHA-256 复用已有视觉分析结果，避免重复调用模型。',
+      minimum: 1,
+      maximum: 720,
+      default: 72,
+      'x-showIf': { enable_vision: true },
+    },
+    vision_timeout_ms: {
+      type: 'integer',
+      title: '视觉模型调用超时（毫秒）',
+      description: '超时后自动降级为纯文本回复，不阻塞整条消息。',
+      minimum: 3000,
+      maximum: 18000,
+      default: 10000,
+      'x-showIf': { enable_vision: true },
+    },
+
+    // ---- V0.5.0 多模态：表情包素材库与智能回复 ----
+    enable_meme_reply: {
+      type: 'boolean',
+      title: '启用智能表情包回复',
+      description: '根据聊天语境从已收藏的群/全局表情包库匹配合适的表情包。',
+      default: true,
+    },
+    meme_send_probability: {
+      type: 'number',
+      title: '表情包发送概率',
+      description: '命中合适表情包时的发送概率（0 ~ 1）。',
+      minimum: 0,
+      maximum: 1,
+      default: 0.35,
+      'x-showIf': { enable_meme_reply: true },
+    },
+    meme_repeat_cooldown_seconds: {
+      type: 'integer',
+      title: '重复表情包冷却（秒）',
+      description: '同一张表情包在同群内该时长内不会重复发送。',
+      minimum: 0,
+      maximum: 86400,
+      default: 180,
+      'x-showIf': { enable_meme_reply: true },
+    },
+    max_consecutive_memes: {
+      type: 'integer',
+      title: '最大连续表情包次数',
+      description: '防止连续刷图与机器人之间无限斗图循环。',
+      minimum: 1,
+      maximum: 5,
+      default: 2,
+      'x-showIf': { enable_meme_reply: true },
+    },
+    meme_ttl_days: {
+      type: 'integer',
+      title: '表情包资源保存天数',
+      description: '到期自动失效并在清理时同步删除 R2 文件与元数据。',
+      minimum: 1,
+      maximum: 365,
+      default: 90,
+    },
+    use_global_meme_library: {
+      type: 'boolean',
+      title: '群聊复用全局素材库',
+      description: '开启后除本群独立素材库外，也可匹配全局素材库中的已启用表情包。',
+      default: true,
+      'x-showIf': { enable_meme_reply: true },
+    },
+
     custom_personas: {
       type: 'array',
       title: '自定义人格',

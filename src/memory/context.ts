@@ -22,6 +22,9 @@ export function extractReadableText(session: Session): string {
     const types = session.attachments.map((a) => (a.contentType?.startsWith('image/') ? '图片' : '附件'))
     return `[发送了${types.join('、')}]`
   }
+  if (session.quote && session.quote.attachments.length > 0) {
+    return '[引用了图片]'
+  }
   return ''
 }
 
@@ -85,7 +88,8 @@ export function formatContextTranscript(messages: readonly ContextMessage[]): st
     .map((m) => {
       const prefix = m.role === 'assistant' ? `[我]` : `[${m.speakerName}(${m.speakerKey})]`
       const quote = m.quoteSummary ? `（引用：“${m.quoteSummary}”）` : ''
-      return `${prefix}${quote}: ${m.text}`
+      const img = m.imageSummary ? ` [图意：${m.imageSummary}]` : ''
+      return `${prefix}${quote}: ${m.text}${img}`
     })
     .join('\n')
 }

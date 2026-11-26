@@ -1,5 +1,5 @@
 /**
- * 插件专属管理页（单文件内联 HTML/CSS/JS）。
+ * 插件专属管理页（V0.5.0 多模态社交版，单文件内联 HTML/CSS/JS）。
  *
  * 严格遵循 QFlareBot 插件页面安全规范：
  * - 接入 /tokens.css 与 /bridge.js；
@@ -21,7 +21,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       color: var(--text, #1f2937);
       background: var(--bg, #f8fafc);
     }
-    .wrap { max-width: 960px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+    .wrap { max-width: 1020px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
     .card {
       background: var(--surface, #ffffff);
       border: 1px solid var(--border, #e5e7eb);
@@ -30,6 +30,14 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
     }
     .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     .between { justify-content: space-between; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .stat-box {
+      padding: 10px 12px;
+      border: 1px solid var(--border, #e5e7eb);
+      border-radius: 10px;
+      background: var(--surface-alt, #f9fafb);
+    }
+    .stat-val { font-size: 20px; font-weight: 600; margin-top: 4px; }
     h1 { font-size: 20px; margin: 0 0 6px; }
     h2 { font-size: 16px; margin: 0 0 12px; }
     .muted { color: var(--text-muted, #6b7280); font-size: 13px; }
@@ -41,6 +49,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       background: var(--surface-alt, #eef2ff);
       color: var(--accent, #3b82f6);
     }
+    .badge-off { background: #fee2e2; color: #b91c1c; }
     .btn {
       padding: 6px 12px;
       border-radius: 8px;
@@ -70,6 +79,14 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       padding: 8px 0;
       border-bottom: 1px solid var(--border, #e5e7eb);
     }
+    .meme-thumb {
+      width: 48px;
+      height: 48px;
+      object-fit: cover;
+      border-radius: 8px;
+      border: 1px solid var(--border, #e5e7eb);
+      background: #f1f5f9;
+    }
   </style>
 </head>
 <body>
@@ -77,14 +94,21 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
     <div class="card">
       <div class="row between">
         <div>
-          <h1>拟人群聊（qflarebot-plugin-social）</h1>
+          <h1>拟人群聊（qflarebot-plugin-social v0.5.0）</h1>
           <div id="summary" class="muted">正在加载运行状态...</div>
+          <div id="mm-summary" class="muted" style="margin-top:4px"></div>
         </div>
         <div class="row">
           <button id="btn-sync-agent" class="btn">同步默认人格到 Agent</button>
           <button id="btn-refresh" class="btn btn-primary">刷新</button>
         </div>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>多模态调用统计（近 7 天合计）</h2>
+      <div class="grid" id="stats-grid"></div>
+      <div class="muted" style="margin-top:8px">提示：视觉模型别名、图片理解开关与频控、表情包概率、重复冷却和保存天数请在「插件 → 拟人群聊 → 插件配置」中修改，即时生效。</div>
     </div>
 
     <div class="card">
@@ -116,6 +140,22 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       </div>
       <div id="memories-list"></div>
     </div>
+
+    <div class="card">
+      <div class="row between" style="margin-bottom:10px">
+        <h2 style="margin:0">表情包素材库管理（R2 + D1）</h2>
+        <div class="row">
+          <select id="meme-scope-filter">
+            <option value="all">全部范围</option>
+            <option value="group">仅群独立库</option>
+            <option value="global">仅全局库</option>
+          </select>
+          <input id="meme-search-input" type="text" placeholder="按标签/情绪/含义搜索" />
+          <button id="btn-search-memes" class="btn btn-primary">查询</button>
+        </div>
+      </div>
+      <div id="memes-list" class="muted">正在加载表情包素材库...</div>
+    </div>
   </div>
 
   <script type="module">
@@ -123,12 +163,46 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
     const bridge = await createBridge()
     bridge.setTitle('拟人群聊')
 
-    let currentData = null
     let activeGroupId = null
 
     function fmtTime(ts) {
       if (!ts) return '未观测'
       return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+    }
+
+    function renderStats(stats) {
+      const grid = document.getElementById('stats-grid')
+      grid.textContent = ''
+      const totals = (stats || []).reduce(
+        (acc, s) => ({
+          visionCalls: acc.visionCalls + (s.visionCalls || 0),
+          visionCacheHits: acc.visionCacheHits + (s.visionCacheHits || 0),
+          visionErrors: acc.visionErrors + (s.visionErrors || 0),
+          memeSent: acc.memeSent + (s.memeSent || 0),
+          memeCollected: acc.memeCollected + (s.memeCollected || 0),
+        }),
+        { visionCalls: 0, visionCacheHits: 0, visionErrors: 0, memeSent: 0, memeCollected: 0 },
+      )
+      const items = [
+        ['视觉模型调用', totals.visionCalls],
+        ['图片缓存命中', totals.visionCacheHits],
+        ['视觉异常降级', totals.visionErrors],
+        ['表情包发送', totals.memeSent],
+        ['表情包收藏', totals.memeCollected],
+      ]
+      for (const [label, val] of items) {
+        const box = document.createElement('div')
+        box.className = 'stat-box'
+        const lbl = document.createElement('div')
+        lbl.className = 'muted'
+        lbl.textContent = label
+        const v = document.createElement('div')
+        v.className = 'stat-val'
+        v.textContent = String(val)
+        box.appendChild(lbl)
+        box.appendChild(v)
+        grid.appendChild(box)
+      }
     }
 
     async function loadOverview() {
@@ -138,13 +212,16 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
         bridge.toast(data.error || '加载失败', 'error')
         return
       }
-      currentData = data
-      const summary = document.getElementById('summary')
-      summary.textContent =
-        '模型别名：' + data.config.modelAlias +
+      document.getElementById('summary').textContent =
+        '对话模型：' + data.config.modelAlias +
+        ' · 视觉模型：' + data.config.visionModelAlias +
         ' · 默认模式：' + data.config.defaultMode +
-        ' · @让渡Agent：' + (data.config.yieldAtToAgent ? '开' : '关') +
-        ' · 群记忆：' + (data.config.enableMemory ? data.config.memoryTtlDays + '天' : '关')
+        ' · @让渡Agent：' + (data.config.yieldAtToAgent ? '开' : '关')
+      document.getElementById('mm-summary').textContent =
+        '图片理解：' + (data.config.enableVision ? '开（限 ' + data.config.visionRateLimitPerMinute + '次/分）' : '关') +
+        ' · 智能表情包：' + (data.config.enableMemeReply ? '开（概率 ' + data.config.memeSendProbability + ' / 重复冷却 ' + data.config.memeRepeatCooldownSeconds + '秒）' : '关') +
+        ' · 保存期限：' + data.config.memeTtlDays + ' 天'
+      renderStats(data.multimodalStats)
       renderGroups(data.groups, data.personas)
     }
 
@@ -212,8 +289,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
             body: JSON.stringify({ mode: selMode.value, personaId: selPersona.value }),
           })
           const out = await r.json()
-          if (out.ok) bridge.toast('已保存群设置', 'success')
-          else bridge.toast(out.error || '保存失败', 'error')
+          bridge.toast(out.ok ? '已保存群设置' : (out.error || '保存失败'), out.ok ? 'success' : 'error')
         }
 
         const btnMem = document.createElement('button')
@@ -277,7 +353,99 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       }
     }
 
-    document.getElementById('btn-refresh').onclick = loadOverview
+    async function loadMemes() {
+      const scope = document.getElementById('meme-scope-filter').value
+      const q = document.getElementById('meme-search-input').value.trim()
+      const qs = new URLSearchParams({ scope, q })
+      const res = await bridge.fetch('/api/memes?' + qs.toString())
+      const data = await res.json()
+      const box = document.getElementById('memes-list')
+      box.textContent = ''
+      if (!data.ok || !data.memes.length) {
+        const empty = document.createElement('div')
+        empty.className = 'muted'
+        empty.textContent = '暂无匹配的表情包。群友可在群内发送或引用图片后输入 /收藏表情 进行授权收藏。'
+        box.appendChild(empty)
+        return
+      }
+      for (const m of data.memes) {
+        const row = document.createElement('div')
+        row.className = 'mem-item'
+
+        const left = document.createElement('div')
+        left.className = 'row'
+
+        const img = document.createElement('img')
+        img.className = 'meme-thumb'
+        img.alt = m.meaning
+        img.src = '/p/social/meme/' + encodeURIComponent(m.id)
+        left.appendChild(img)
+
+        const info = document.createElement('div')
+        const top = document.createElement('div')
+        const scopeBadge = document.createElement('span')
+        scopeBadge.className = 'badge'
+        scopeBadge.textContent = m.scope === 'global' ? '全局' : ('群:' + (m.groupId || '').slice(0, 8))
+        top.appendChild(scopeBadge)
+
+        if (!m.enabled) {
+          const disBadge = document.createElement('span')
+          disBadge.className = 'badge badge-off'
+          disBadge.style.marginLeft = '6px'
+          disBadge.textContent = '已禁用'
+          top.appendChild(disBadge)
+        }
+
+        const title = document.createElement('span')
+        title.style.marginLeft = '8px'
+        title.textContent = m.meaning + '（情绪:' + (m.mood || '无') + ' / 分类:' + m.category + '）'
+        top.appendChild(title)
+
+        const sub = document.createElement('div')
+        sub.className = 'muted'
+        sub.textContent =
+          '标签：' + (m.tags.length ? m.tags.join('、') : '无') +
+          ' · 使用 ' + m.useCount + ' 次 · 过期：' + fmtTime(m.expiresAt)
+        info.appendChild(top)
+        info.appendChild(sub)
+        left.appendChild(info)
+
+        const actions = document.createElement('div')
+        actions.className = 'row'
+
+        const toggleBtn = document.createElement('button')
+        toggleBtn.className = 'btn'
+        toggleBtn.textContent = m.enabled ? '禁用' : '启用'
+        toggleBtn.onclick = async () => {
+          await bridge.fetch('/api/memes/' + encodeURIComponent(m.id), {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ enabled: !m.enabled }),
+          })
+          bridge.toast(m.enabled ? '已禁用表情包' : '已启用表情包', 'success')
+          loadMemes()
+        }
+
+        const delBtn = document.createElement('button')
+        delBtn.className = 'btn btn-danger'
+        delBtn.textContent = '删除'
+        delBtn.onclick = async () => {
+          await bridge.fetch('/api/memes/' + encodeURIComponent(m.id), { method: 'DELETE' })
+          bridge.toast('已删除表情包及 R2 原图', 'success')
+          loadMemes()
+        }
+
+        actions.appendChild(toggleBtn)
+        actions.appendChild(delBtn)
+        row.appendChild(left)
+        row.appendChild(actions)
+        box.appendChild(row)
+      }
+    }
+
+    document.getElementById('btn-refresh').onclick = () => { loadOverview(); loadMemes() }
+    document.getElementById('btn-search-memes').onclick = loadMemes
+    document.getElementById('meme-scope-filter').onchange = loadMemes
     document.getElementById('btn-sync-agent').onclick = async () => {
       const r = await bridge.fetch('/api/sync-agent', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
       const out = await r.json()
@@ -309,7 +477,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       loadMemories(activeGroupId)
     }
 
-    await loadOverview()
+    await Promise.all([loadOverview(), loadMemes()])
   </script>
 </body>
 </html>

@@ -56,7 +56,7 @@ describe('chat pipeline, commands, tools & admin routes', () => {
       content: '今天上班好累',
       atMe: false,
     })
-    const o1 = await handleGroupChatEvent(s1, ctx, { now: () => 1_000_000, random: () => 0.95 })
+    const o1 = await handleGroupChatEvent(s1, ctx, { now: () => 1_000_000, random: () => 0.95, awaitBackground: true })
     expect(o1.replied).toBe(false)
     expect(chat).toHaveBeenCalledTimes(0)
     expect(s1.replies).toHaveLength(0)
@@ -71,7 +71,7 @@ describe('chat pipeline, commands, tools & admin routes', () => {
       content: '小Q今晚吃火锅点啥菜好？',
       atMe: false,
     })
-    const o2 = await handleGroupChatEvent(s2, ctx, { now: () => 1_005_000, random: () => 0.95 })
+    const o2 = await handleGroupChatEvent(s2, ctx, { now: () => 1_005_000, random: () => 0.95, awaitBackground: true })
     expect(o2.replied).toBe(true)
     expect(chat).toHaveBeenCalledTimes(1)
     expect(s2.replies).toEqual(['火锅必须安排毛肚和鸭肠！'])
@@ -82,7 +82,7 @@ describe('chat pipeline, commands, tools & admin routes', () => {
       ctx: ctxOpts,
     })
     expect(String(statusSession.replies[0])).toContain('非@全量消息权限：已收到')
-    expect(String(statusSession.replies[0])).toContain('LLM 服务：正常（chat-fast）')
+    expect(String(statusSession.replies[0])).toContain('对话模型：正常（chat-fast）')
   })
 
   it('supports member self-service privacy commands, admin commands, and v5 group-isolated tools', async () => {

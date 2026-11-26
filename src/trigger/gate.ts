@@ -53,12 +53,20 @@ export interface GateOptions {
  * - 先拦截机器人自身消息与 `session.addressedToOthers`；
  * - 同群启用 Agent 且 `yield_at_to_agent: true` 时让渡 `@机器人` 消息，避免重复调用模型和重复回复。
  */
+function isOtherBotSender(session: Session): boolean {
+  const raw = session.raw as { author?: { bot?: unknown } } | undefined
+  return raw?.author?.bot === true
+}
+
 export function evaluateTrigger(opts: GateOptions): TriggerDecision {
   const { session, config, settings, state, callNames } = opts
   const now = opts.now ?? Date.now()
 
   if (session.userId === session.botId) {
     return { shouldReply: false, reason: 'bot-self', score: 0, recordContext: false }
+  }
+  if (isOtherBotSender(session)) {
+    return { shouldReply: false, reason: 'bot-sender', score: 0, recordContext: false }
   }
   if (session.scene !== 'group') {
     return { shouldReply: false, reason: 'not-group', score: 0, recordContext: false }

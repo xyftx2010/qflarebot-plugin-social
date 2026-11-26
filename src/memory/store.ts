@@ -24,6 +24,10 @@ const MEMBER_MEMORY_PATTERNS: readonly RegExp[] = [
   /^记住(?:一下)?[，,：:\s]*(.{3,60})$/,
 ]
 
+/** 过滤玩笑、反讽、猜测与图片占位符，防止把非真实事实写入长期记忆 */
+const NON_FACTUAL_OR_JOKE_RE =
+  /(?:哈哈|笑死|开玩笑|骗你的|逗你|反讽|假装|大概|可能|猜的|听说|doge|滑稽|\/s|\[发送了|\[引用了|\[图意)/i
+
 export function resolveMemoryTtlDays(config: SocialConfig, settings?: GroupSettings | null): number {
   const days = settings?.memoryTtlDays ?? config.memory_ttl_days
   return Math.min(90, Math.max(1, Math.floor(days || 30)))
@@ -32,6 +36,7 @@ export function resolveMemoryTtlDays(config: SocialConfig, settings?: GroupSetti
 export function extractCandidateMemory(text: string): { scope: MemoryScope; content: string } | null {
   const trimmed = text.trim()
   if (trimmed.length < 4 || trimmed.length > 80) return null
+  if (NON_FACTUAL_OR_JOKE_RE.test(trimmed)) return null
   for (const pattern of MEMBER_MEMORY_PATTERNS) {
     if (pattern.test(trimmed)) {
       const sanitized = sanitizeSensitiveText(trimmed)

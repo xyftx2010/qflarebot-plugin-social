@@ -344,4 +344,89 @@ export async function trimExcessGroupMemories(
   return deleted
 }
 
+export interface GroupChatSnapshot {
+  settings: GroupSettings | null
+  state: GroupState | null
+  memories: GroupMemory[]
+}
+
+/**
+ * 一次 D1 网络往返合批读取群设置、群状态滑窗与活跃记忆，显著降低回复前延迟。
+ */
+export async function loadGroupChatSnapshot(
+  db: ScopedDB,
+  groupId: string,
+  now = Date.now(),
+  includeMemories = true,
+  memoryLimit = 12,
+): Promise<GroupChatSnapshot> {
+  if (typeof db.batch === 'function') {
+    const statements = [
+      {
+        sql: 'SELECT group_id, mode, persona_id, cooldown_seconds, reply_probability, memory_ttl_days, updated_at FROM {group_settings} WHERE group_id = ?',
+        params: [groupId],
+      },
+      {
+        sql: `SELECT group_id, recent_messages_json, last_reply_at, window_start_at, window_reply_count,
+                     last_non_at_seen_at, last_prune_at, updated_at
+              FROM {group_state} WHERE group_id = ?`,
+        params: [groupId],
+      },
+      ...(includeMemories
+        ? [
+            {
+              sql: `SELECT id, group_id, user_id, user_name, scope, content, created_at, expires_at
+                    FROM {group_memories}
+                    WHERE group_id = ? AND expires_at > ?
+                    ORDER BY created_at DESC
+                    LIMIT ?`,
+              params: [groupId, now, memoryLimit],
+            },
+          ]
+        : []),
+    ]
+
+    const results = await db.batch(statements)
+    const settingsRow = results[0]?.results[0] as unknown as GroupSettingsRow | undefined
+    const stateRow = results[1]?.results[0] as unknown as GroupStateRow | undefined
+    const memoryRows = includeMemories
+      ? ((results[2]?.results ?? []) as unknown as GroupMemoryRow[])
+      : []
+
+    return {
+      settings: settingsRow
+        ? {
+            groupId: settingsRow.group_id,
+            mode: parseMode(settingsRow.mode),
+            personaId: settingsRow.persona_id,
+            cooldownSeconds: settingsRow.cooldown_seconds,
+            replyProbability: settingsRow.reply_probability,
+            memoryTtlDays: settingsRow.memory_ttl_days,
+            updatedAt: settingsRow.updated_at,
+          }
+        : null,
+      state: stateRow
+        ? {
+            groupId: stateRow.group_id,
+            recentMessages: parseContextJson(stateRow.recent_messages_json),
+            lastReplyAt: stateRow.last_reply_at,
+            windowStartAt: stateRow.window_start_at,
+            windowReplyCount: stateRow.window_reply_count,
+            lastNonAtSeenAt: stateRow.last_non_at_seen_at,
+            lastPruneAt: stateRow.last_prune_at,
+            updatedAt: stateRow.updated_at,
+          }
+        : null,
+      memories: memoryRows.map(mapMemoryRow),
+    }
+  }
+
+  const [settings, state, memories] = await Promise.all([
+    getGroupSettings(db, groupId),
+    getGroupState(db, groupId),
+    includeMemories ? listActiveGroupMemories(db, groupId, now, memoryLimit) : Promise.resolve([]),
+  ])
+  return { settings, state, memories }
+}
+
 export type { MemoryScope }
