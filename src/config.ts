@@ -6,7 +6,7 @@ export const defaultConfig: SocialConfig = {
   vision_model_alias: '',
   default_mode: 'auto',
   default_persona: 'lively',
-  yield_at_to_agent: true,
+  yield_at_to_agent: false,
   call_names: '',
   base_reply_probability: 0.18,
   trigger_threshold: 55,
@@ -59,6 +59,17 @@ export const defaultConfig: SocialConfig = {
   voice_fallback_to_text: true,
   voice_cache_ttl_hours: 6,
   voice_cost_per_1k_chars: 0.2,
+
+  // V0.11.0 Social-Agent 默认值
+  enable_agent_tools: true,
+  agent_max_tool_steps: 4,
+  agent_max_tool_calls: 6,
+  tool_timeout_ms: 8_000,
+  agent_budget_ms: 18_000,
+  context_max_tokens: 3000,
+  enable_c2c_chat: false,
+  web_search_provider: 'tavily',
+  web_search_api_key: '',
 }
 
 export const configSchema: JsonSchema = {
@@ -94,9 +105,9 @@ export const configSchema: JsonSchema = {
     },
     yield_at_to_agent: {
       type: 'boolean',
-      title: '将 @机器人 让渡给 Agent（防重复回复）',
-      description: '同群启用 qflarebot-plugin-agent 时建议开启：本插件只负责非 @ 自然群聊，@机器人 交给 Agent 处理，避免重复调用模型和重复回复。',
-      default: true,
+      title: '兼容项：将 @机器人 让渡给外部 Agent',
+      description: 'V1.0.0 起本插件已内置完整 Agent 工具循环，默认关闭即可彻底接管 @机器人（无需再装官方 agent 插件）。',
+      default: false,
     },
     call_names: {
       type: 'string',
@@ -472,6 +483,80 @@ export const configSchema: JsonSchema = {
       maximum: 100,
       default: 0.2,
       'x-showIf': { enable_voice: true },
+    },
+
+    // ---- V0.11.0 全托管 Social-Agent 能力 ----
+    enable_agent_tools: {
+      type: 'boolean',
+      title: '启用内置 Agent 工具调用',
+      description: '开启后，@机器人 与 /ask 可调用内置娱乐/查询工具与管理页白名单放行的外部插件工具；非 @ 插话保持快通道不增延迟。',
+      default: true,
+    },
+    agent_max_tool_steps: {
+      type: 'integer',
+      title: 'Agent 最大循环步数',
+      description: '单次对话最多执行的工具轮次（建议 3 ~ 5，控制免费版 50 子请求与 30 秒预算）。',
+      minimum: 1,
+      maximum: 6,
+      default: 4,
+      'x-showIf': { enable_agent_tools: true },
+    },
+    agent_max_tool_calls: {
+      type: 'integer',
+      title: '单轮最大工具调用次数',
+      description: '限制单次对话累计调用工具的总次数，防止并行过多工具耗尽预算。',
+      minimum: 1,
+      maximum: 12,
+      default: 6,
+      'x-showIf': { enable_agent_tools: true },
+    },
+    tool_timeout_ms: {
+      type: 'integer',
+      title: '单次工具调用超时（毫秒）',
+      minimum: 2000,
+      maximum: 15000,
+      default: 8000,
+      'x-showIf': { enable_agent_tools: true },
+    },
+    agent_budget_ms: {
+      type: 'integer',
+      title: 'Agent 软超时预算（毫秒）',
+      description: '达到软预算后停止继续调工具并直接总结回复，避免触碰 QQ 30 秒硬窗。',
+      minimum: 6000,
+      maximum: 24000,
+      default: 18000,
+      'x-showIf': { enable_agent_tools: true },
+    },
+    context_max_tokens: {
+      type: 'integer',
+      title: '短期上下文 Token 预算',
+      description: '估算上下文超过该 Token 上限时自动压缩裁剪旧对话，防止长会话溢出。',
+      minimum: 600,
+      maximum: 12000,
+      default: 3000,
+    },
+    enable_c2c_chat: {
+      type: 'boolean',
+      title: '允许私聊（单聊）对话',
+      description: '开启后可在 QQ 单聊直接与机器人对话并使用 Agent 工具（与群聊记忆严格隔离）。',
+      default: false,
+    },
+    web_search_provider: {
+      title: '联网搜索供应商（可选）',
+      oneOf: [
+        { const: 'tavily', title: 'Tavily Search' },
+        { const: 'bocha', title: '博查搜索（Bocha）' },
+      ],
+      default: 'tavily',
+      'x-showIf': { enable_agent_tools: true },
+    },
+    web_search_api_key: {
+      type: 'string',
+      title: '联网搜索 API Key（可选）',
+      description: '填写后自动解锁 social.web_search 联网查热梗/攻略工具；留空则不启用。',
+      writeOnly: true,
+      default: '',
+      'x-showIf': { enable_agent_tools: true },
     },
 
     custom_personas: {

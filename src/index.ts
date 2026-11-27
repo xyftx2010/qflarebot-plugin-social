@@ -1,5 +1,5 @@
 import { definePlugin, meetsPermission } from '@qqbot/sdk'
-import type { LLMService, SocialConfig, SocialMode } from './types.js'
+import type { AgentPromptService, LLMService, SocialConfig, SocialMode } from './types.js'
 import { configSchema, defaultConfig } from './config.js'
 import { ensureSchema } from './store/schema.js'
 import {
@@ -14,6 +14,14 @@ import {
 } from './store/db.js'
 import { listAvailableMemesForGroup, listMultimodalStats } from './store/multimodal-db.js'
 import { countGroupVoiceSentToday, getGroupVoiceSettings } from './store/voice-db.js'
+import {
+  deletePromptFragment,
+  getAgentToolPolicy,
+  listLLMUsageStats,
+  listPromptFragments,
+  setPromptFragmentEnabled,
+  upsertPromptFragment,
+} from './store/agent-db.js'
 import { resolveEffectiveVoiceConfig } from './voice/decision.js'
 import { recordVoiceSendLog, synthesizeAndPrepareVoice } from './voice/service.js'
 import { addGroupMemory, resolveMemoryTtlDays } from './memory/store.js'
@@ -33,8 +41,10 @@ import { createAdminRoutes } from './admin/routes.js'
 import { generateTestToneWavBase64 } from './voice/probe.js'
 
 const HELP_TEXT = [
-  '拟人群聊（social v0.10.0）命令：',
-  '/social status — 查看本群状态、权限与多模态/语音诊断',
+  '拟人群聊（social v0.11.0 · 独立 Social Agent）命令：',
+  '/ask <问题>（/问）— 直接向 Social Agent 提问（支持工具调用）',
+  '/social status — 查看本群状态、权限、模型用量与多模态/语音诊断',
+  '/social tools — 查看当前启用的内置工具与外部插件工具白名单（群管理员）',
   '/social persona [名称|off] — 查看/切换本群人格（群管理员）',
   '/social mode <auto|at|off> — 切换本群发言模式（群管理员）',
   '/social memory [list|add <内容>|clear] — 管理本群记忆（群管理员）',
@@ -44,7 +54,6 @@ const HELP_TEXT = [
   '/social memes [关键词|disable <id>|enable <id>|del <id>]（/表情库）— 搜索或管理表情包库',
   '/social say <内容>（/说）— 手动发送原生语音消息',
   '/social voicetest <wav-b64|wav-url|url> — 测试 QQ 原生语音发送（群管理员）',
-  '/social sync — 将本群人格基调同步到 Agent 插件（群管理员）',
 ].join('\n')
 
 function formatTime(ts: number): string {
@@ -62,7 +71,7 @@ export default definePlugin<SocialConfig>({
 
   depends: {
     llm: '*',
-    agent: 'optional',
+    'core.tools': 'optional',
   },
 
   configSchema,
@@ -79,11 +88,49 @@ export default definePlugin<SocialConfig>({
 
   services: {
     social: (ctx) => createSocialService(ctx),
+    /** 兼容生态插件的 AgentService 提示词扩展契约（不含已弃用的 registerTool） */
+    agent: (ctx): AgentPromptService => ({
+      async registerPrompt(plugin, fragment, priority) {
+        await ensureSchema(ctx.db, ctx.logger)
+        return upsertPromptFragment(ctx.db, plugin, fragment, priority)
+      },
+      async disablePrompt(plugin) {
+        await ensureSchema(ctx.db, ctx.logger)
+        return setPromptFragmentEnabled(ctx.db, plugin, false)
+      },
+      async clearPrompt(plugin) {
+        await ensureSchema(ctx.db, ctx.logger)
+        return deletePromptFragment(ctx.db, plugin)
+      },
+      async listPrompts() {
+        await ensureSchema(ctx.db, ctx.logger)
+        const rows = await listPromptFragments(ctx.db, false)
+        return rows.map((r) => ({
+          plugin: r.plugin,
+          fragment: r.fragment,
+          priority: r.priority,
+          enabled: r.enabled,
+        }))
+      },
+    }),
   },
 
   tools: createSocialTools(),
 
   commands: {
+    ask: {
+      aliases: ['问'],
+      description: '向Social Agent提问',
+      usage: '/ask <问题>',
+      scenes: ['group', 'c2c'],
+      async handler({ session, ctx, argText }) {
+        const text = argText.trim()
+        if (!text) return '用法：/ask <你的问题>'
+        await handleGroupChatEvent(session, ctx, { forceReply: true, overrideText: text })
+        return undefined
+      },
+    },
+
     social: {
       aliases: ['社交'],
       description: '拟人群聊帮助',
@@ -99,7 +146,7 @@ export default definePlugin<SocialConfig>({
         await ensureSchema(ctx.db, ctx.logger)
         const groupId = session.targetId
         const now = Date.now()
-        const [settings, state, memories, memes, stats, groupVoice, voiceToday] = await Promise.all([
+        const [settings, state, memories, memes, stats, groupVoice, voiceToday, llmUsage, toolPolicy] = await Promise.all([
           getGroupSettings(ctx.db, groupId),
           getGroupState(ctx.db, groupId),
           listActiveGroupMemories(ctx.db, groupId, now, 60),
@@ -114,6 +161,8 @@ export default definePlugin<SocialConfig>({
           listMultimodalStats(ctx.db, 1),
           getGroupVoiceSettings(ctx.db, groupId),
           countGroupVoiceSentToday(ctx.db, groupId, now),
+          listLLMUsageStats(ctx.db, 1),
+          getAgentToolPolicy(ctx.db),
         ])
         const effectiveVoice = resolveEffectiveVoiceConfig(ctx.config, groupVoice)
         const mode = resolveEffectiveMode(ctx.config, settings)
@@ -155,19 +204,25 @@ export default definePlugin<SocialConfig>({
             ? '未就绪（缺少 TTS API Key）'
             : '关'
 
+        const todayLlm = llmUsage[0]
+        const llmUsageLine = todayLlm
+          ? `${todayLlm.runs} 次调用 / ${todayLlm.toolCalls} 次工具 / ${todayLlm.inputTokens + todayLlm.outputTokens} tokens`
+          : '今日暂无调用'
+
         return [
-          '【本群拟人聊天状态 v0.10.0】',
+          '【本群拟人聊天状态 v0.11.0 · 独立 Social Agent】',
           `- 发言模式：${mode}`,
           `- 当前人格：${persona.name}（${persona.id}）`,
-          `- @机器人让渡Agent：${ctx.config.yield_at_to_agent ? '开（防重复回复）' : '关（由本插件回复）'}`,
+          `- Agent 工具：${ctx.config.enable_agent_tools ? `开（内置 ${toolPolicy.enabledBuiltins.length} / 外部白名单 ${toolPolicy.enabledExternalTools.length}）` : '关'}`,
           `- 冷却时间：${cooldown} 秒（每分钟上限 ${ctx.config.max_replies_per_minute} 条）`,
           `- 非@全量消息权限：${nonAtDiag}`,
-          `- 短期上下文：${state?.recentMessages.length ?? 0} 条`,
+          `- 短期上下文：${state?.recentMessages.length ?? 0} 条（预算 ${ctx.config.context_max_tokens} tokens）`,
           `- 本群活跃记忆：${memories.length} 条（保留 ${resolveMemoryTtlDays(ctx.config, settings)} 天）`,
           `- 可用表情包：${memes.length} 张（智能发图：${ctx.config.enable_meme_reply ? '开' : '关'}）`,
           `- AI 语音互动：${voiceLine}`,
           `- 对话模型：${llmStatus}`,
           `- 图片理解：${visionStatus}`,
+          `- 今日模型用量：${llmUsageLine}`,
           `- 多模态统计：${todayLine}`,
         ].join('\n')
       },
@@ -514,6 +569,23 @@ export default definePlugin<SocialConfig>({
       },
     },
 
+    'social tools': {
+      aliases: ['工具列表'],
+      description: '查看Agent启用工具',
+      permission: 'group_admin',
+      scenes: ['group'],
+      async handler({ ctx }) {
+        await ensureSchema(ctx.db, ctx.logger)
+        const policy = await getAgentToolPolicy(ctx.db)
+        return [
+          `Agent 工具总开关：${ctx.config.enable_agent_tools ? '开' : '关'}（最多 ${ctx.config.agent_max_tool_steps} 步 / ${ctx.config.agent_max_tool_calls} 次）`,
+          `- 已启用内置工具：${policy.enabledBuiltins.join('、') || '无'}`,
+          `- 联网搜索：${ctx.config.web_search_api_key.trim() ? ctx.config.web_search_provider : '未配置 API Key'}`,
+          `- 外部 core.tools 白名单：${policy.enabledExternalTools.join('、') || '无（可在面板管理页开启）'}`,
+        ].join('\n')
+      },
+    },
+
     'social sync': {
       aliases: ['同步人格'],
       description: '同步人格到Agent',
@@ -537,6 +609,10 @@ export default definePlugin<SocialConfig>({
       await handleGroupChatEvent(session, ctx)
     },
     'qq.group.message': async ({ session, ctx }) => {
+      await handleGroupChatEvent(session, ctx)
+    },
+    'qq.c2c.message': async ({ session, ctx }) => {
+      if (!ctx.config.enable_c2c_chat) return
       await handleGroupChatEvent(session, ctx)
     },
   },

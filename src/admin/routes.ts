@@ -18,6 +18,18 @@ import {
   summarizeVoiceUsage,
   upsertGroupVoiceSettings,
 } from '../store/voice-db.js'
+import {
+  deletePromptFragment,
+  getAgentToolPolicy,
+  listLLMUsageStats,
+  listPromptFragments,
+  listRecentToolLogs,
+  listToolStats,
+  saveAgentToolPolicy,
+  setPromptFragmentEnabled,
+} from '../store/agent-db.js'
+import { BUILTIN_TOOLS } from '../agent/builtin-tools.js'
+import { tryGetCoreTools } from '../agent/external-tools.js'
 import { addGroupMemory, resolveMemoryTtlDays } from '../memory/store.js'
 import { listAllPersonas, resolvePersona, syncPersonaToAgent } from '../persona/manager.js'
 import { deleteMemeAsset, getMemeById, searchMemesByQuery, updateMemeRecord } from '../meme/store.js'
@@ -456,6 +468,114 @@ export function createAdminRoutes(): Route<SocialConfig>[] {
         } catch (err) {
           return jsonError(502, err instanceof Error ? err.message : String(err))
         }
+      },
+    },
+    // ---- V0.11.0 Agent 工具中心、模型用量与提示词片段管理接口 ----
+    {
+      method: 'GET',
+      path: '/api/agent/overview',
+      auth: 'admin',
+      handler: async ({ ctx }) => {
+        await ensureSchema(ctx.db, ctx.logger)
+        const [policy, llmUsage7d, toolStats7d, toolLogs, promptFragments] = await Promise.all([
+          getAgentToolPolicy(ctx.db),
+          listLLMUsageStats(ctx.db, 7),
+          listToolStats(ctx.db, 7),
+          listRecentToolLogs(ctx.db, 40),
+          listPromptFragments(ctx.db, false),
+        ])
+
+        const registry = tryGetCoreTools(ctx)
+        let externalCatalog: Array<{
+          id: string
+          owner: string
+          description: string
+          permission: string
+          sideEffect: string
+        }> = []
+        if (registry) {
+          const all = await registry.list().catch(() => [])
+          externalCatalog = all
+            .filter((d) => d.owner !== ctx.plugin.name)
+            .map((d) => ({
+              id: d.id,
+              owner: d.owner,
+              description: d.description,
+              permission: d.permission,
+              sideEffect: d.sideEffect,
+            }))
+        }
+
+        return Response.json({
+          ok: true,
+          config: {
+            enableAgentTools: ctx.config.enable_agent_tools,
+            maxToolSteps: ctx.config.agent_max_tool_steps,
+            maxToolCalls: ctx.config.agent_max_tool_calls,
+            toolTimeoutMs: ctx.config.tool_timeout_ms,
+            agentBudgetMs: ctx.config.agent_budget_ms,
+            contextMaxTokens: ctx.config.context_max_tokens,
+            enableC2cChat: ctx.config.enable_c2c_chat,
+            webSearchProvider: ctx.config.web_search_provider,
+            hasWebSearchKey: Boolean(ctx.config.web_search_api_key.trim()),
+            coreToolsAvailable: Boolean(registry),
+          },
+          policy,
+          builtinTools: BUILTIN_TOOLS.map((t) => ({
+            id: t.id,
+            description: t.description,
+            sideEffect: t.sideEffect,
+            requiresApiKey: Boolean(t.requiresApiKey),
+          })),
+          externalCatalog,
+          llmUsage7d,
+          toolStats7d,
+          toolLogs,
+          promptFragments,
+        })
+      },
+    },
+    {
+      method: 'PUT',
+      path: '/api/agent/policy',
+      auth: 'admin',
+      handler: async ({ ctx, request }) => {
+        const body = await readJsonBody(request)
+        if (!body) return jsonError(400, '请求体必须是 JSON 对象')
+        await ensureSchema(ctx.db, ctx.logger)
+        const strArr = (v: unknown) =>
+          Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0) : undefined
+        const saved = await saveAgentToolPolicy(ctx.db, {
+          enabledBuiltins: strArr(body.enabledBuiltins),
+          enabledExternalTools: strArr(body.enabledExternalTools),
+          allowExternalWrites: typeof body.allowExternalWrites === 'boolean' ? body.allowExternalWrites : undefined,
+        })
+        return Response.json({ ok: true, policy: saved })
+      },
+    },
+    {
+      method: 'PATCH',
+      path: '/api/agent/prompts/:plugin',
+      auth: 'admin',
+      handler: async ({ ctx, params, request }) => {
+        const pluginName = decodeURIComponent(params.plugin ?? '').trim()
+        const body = await readJsonBody(request)
+        if (!pluginName || typeof body?.enabled !== 'boolean') return jsonError(400, '参数无效')
+        await ensureSchema(ctx.db, ctx.logger)
+        const ok = await setPromptFragmentEnabled(ctx.db, pluginName, body.enabled)
+        return Response.json({ ok })
+      },
+    },
+    {
+      method: 'DELETE',
+      path: '/api/agent/prompts/:plugin',
+      auth: 'admin',
+      handler: async ({ ctx, params }) => {
+        const pluginName = decodeURIComponent(params.plugin ?? '').trim()
+        if (!pluginName) return jsonError(400, '缺少 plugin')
+        await ensureSchema(ctx.db, ctx.logger)
+        const ok = await deletePromptFragment(ctx.db, pluginName)
+        return Response.json({ ok })
       },
     },
     {

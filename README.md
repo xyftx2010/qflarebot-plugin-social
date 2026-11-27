@@ -1,22 +1,23 @@
-# qflarebot-plugin-social (v0.10.0)
+# qflarebot-plugin-social (v0.11.0)
 
-基于 QFlareBot 官方插件框架（SDK 契约 v5）开发的 QQ 群聊多模态拟人娱乐互动插件（自然对话 + 图片理解 + 表情包素材库 + AI 原生语音互动）。
+基于 QFlareBot 官方插件框架（SDK 契约 v5）开发的 **独立多模态拟人 Social Agent 插件**（自然群聊 + Function Calling 工具调用 + `core.tools` 生态接入 + 图片理解 + 表情包素材库 + AI 原生语音互动 + 长期记忆），可在停用官方 `qflarebot-plugin-agent` 后完全独立运行。
 
 ## 核心特性
 
-- **AI 原生语音回复**：支持 MiniMax Speech、阿里千问 TTS、OpenAI Compatible TTS；支持 `manual` / `probability` / `ai`（单次 LLM 请求同步决策语音与情绪）/ `always` 四种触发模式；直接以 QQ 原生语音条发送，失败自动降级文字，支持短期 R2 缓存复用、每日上限、字符数上限与管理页在线试听。
-- **自然群聊与权限诊断**：同时监听 `qq.group.at_message` 与 `qq.group.message`，严格过滤 `session.addressedToOthers` 与其他机器人发言，提供 `/social status` 实时诊断群全量消息权限、对话/视觉/语音状态。
-- **按需图片理解（Vision）**：解析当前消息与引用消息中的图片附件，支持独立视觉模型别名（`vision_model_alias`）、按 SHA-256 哈希复用分析结果、每群每分钟频控与下载/过期/无视觉能力降级。
-- **表情包素材库（R2 + D1）**：仅响应群友主动授权收藏（`/收藏表情`），默认跨群共享（可按需切换为群级隔离），按 SHA-256 去重，R2 保存原图、D1 保存元数据与 TTL 期限。
-- **智能表情包与语音互斥回复**：支持纯文本、纯表情包、文本+表情包与原生语音回复，避免同一消息重复发语音和文字。
-- **群级隔离长期记忆与隐私保护**：支持 TTL 过期、敏感信息正则脱敏、拒绝将玩笑/反讽及视觉推测写入长期记忆、成员自助 `/social forgetme` 与 `/social privacy off`。
-- **专属管理后台**：`/p/social/ui/` 提供群状态诊断、人格与模式管理、群记忆管理、近 7 天多模态与语音费用统计、在线语音试听、语音日志及表情包素材库管理。
+- **独立 Social Agent 执行引擎**：快慢双通道架构——非 `@` 普通群聊走零工具快通道，1~2 秒响应；`@机器人` 与 `/ask` 按需进入多步 ReAct 工具循环（支持思考签名透传、死循环拦截、步数/次数/软超时预算控制与上下文 Token 压缩）。
+- **内置工具 + SDK v5 `core.tools`**：内置时间、实时天气、联网搜索（Tavily/Bocha）、网页读取、抽签掷骰、群记忆/表情检索等 8 个低风险工具；自动发现其他插件公开的 `core.tools` 工具（默认白名单关闭）并支持工具图片附件直接交付。
+- **AI 原生语音回复**：优先支持阿里云百炼千问 TTS（含 `qwen-audio-3.1-tts-plus` 自动路由 `SpeechSynthesizer` 与 `qwen3-tts-flash`）、MiniMax Speech、OpenAI Compatible TTS；支持 `manual / probability / ai / always` 四种模式，失败自动降级文字，避免语音和文字重复发送。
+- **按需图片理解（Vision）与表情包库（R2 + D1）**：解析当前及引用图片、SHA-256 缓存复用、主动授权收藏（`/收藏表情`）、默认跨群共享表情库与智能表情包回复。
+- **群级隔离长期记忆与隐私保护**：TTL 过期、敏感脱敏、反讽/猜测过滤、成员自助 `/social forgetme` 与 `/social privacy off`。
+- **生态兼容与全功能管理后台**：对外导出兼容 `services.agent` 提示词服务；`/p/social/ui/` 提供群状态、记忆管理、表情包管理、在线语音试听与费用统计、Agent 工具白名单、7 日模型用量与真实工具执行日志。
 
 ## 群聊常用命令
 
 | 命令（别名） | 权限 | 说明 |
 | --- | --- | --- |
-| `/social status`（`/社交 状态`） | 所有人 | 查看本群状态、权限与多模态/语音诊断 |
+| `/ask <问题>`（`/问`） | 所有人 | 向 Social Agent 提问（支持工具调用） |
+| `/social status`（`/社交 状态`） | 所有人 | 查看本群状态、权限、模型用量与多模态/语音诊断 |
+| `/social tools`（`/工具列表`） | 群管理员 | 查看启用的内置工具与外部 `core.tools` 白名单 |
 | `/social say <文本>`（`/说`） | 所有人 | 手动合成并发送 QQ 原生语音消息 |
 | `/social voicetest <wav-b64\|wav-url\|url>` | 群管理员 | 实测 QQ 原生语音发送回执 |
 | `/social persona [ID\|off]` | 群管理员 | 查看或切换本群人格（`lively`/`witty`/`warm`） |

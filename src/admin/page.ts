@@ -94,7 +94,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
     <div class="card">
       <div class="row between">
         <div>
-          <h1>拟人群聊（qflarebot-plugin-social v0.10.0）</h1>
+          <h1>拟人群聊（qflarebot-plugin-social v0.11.0 · 独立 Social Agent）</h1>
           <div id="summary" class="muted">正在加载运行状态...</div>
           <div id="mm-summary" class="muted" style="margin-top:4px"></div>
         </div>
@@ -139,6 +139,21 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
         <button id="btn-add-memory" class="btn btn-primary">添加记忆</button>
       </div>
       <div id="memories-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="row between" style="margin-bottom:10px">
+        <h2 style="margin:0">Social Agent 工具中心、模型用量与执行日志</h2>
+        <button id="btn-save-tools" class="btn btn-primary">保存工具白名单</button>
+      </div>
+      <div id="agent-summary" class="muted" style="margin-bottom:10px">正在加载 Agent 状态...</div>
+      <div class="grid" id="llm-usage-grid" style="margin-bottom:12px"></div>
+      <div class="muted" style="margin-bottom:6px">内置娱乐/查询工具：</div>
+      <div id="builtin-tools-box" class="row" style="margin-bottom:12px"></div>
+      <div class="muted" style="margin-bottom:6px">外部插件工具白名单（框架 core.tools 自动发现，默认关闭）：</div>
+      <div id="external-tools-box" class="row" style="margin-bottom:12px"></div>
+      <div class="muted" style="margin-bottom:6px">最近工具执行日志：</div>
+      <div id="tool-logs-list" class="muted">暂无工具调用记录。</div>
     </div>
 
     <div class="card">
@@ -543,7 +558,140 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       bridge.toast('试听语音已就绪', 'success')
     }
 
-    document.getElementById('btn-refresh').onclick = () => { loadOverview(); loadMemes(); loadVoiceOverview() }
+    let selectedBuiltins = new Set()
+    let selectedExternals = new Set()
+
+    async function loadAgentOverview() {
+      const res = await bridge.fetch('/api/agent/overview')
+      const data = await res.json()
+      if (!data.ok) return
+      const c = data.config
+      document.getElementById('agent-summary').textContent =
+        'Agent 工具：' + (c.enableAgentTools ? '开' : '关') +
+        ' · 步数/次数：' + c.maxToolSteps + '步 / ' + c.maxToolCalls + '次' +
+        ' · 预算：' + c.agentBudgetMs + 'ms' +
+        ' · 上下文压缩：' + c.contextMaxTokens + ' tokens' +
+        ' · 联网搜索：' + (c.hasWebSearchKey ? c.webSearchProvider : '未配置Key') +
+        ' · core.tools：' + (c.coreToolsAvailable ? '已接入' : '未提供')
+
+      const usageTotals = (data.llmUsage7d || []).reduce(
+        (acc, r) => ({
+          runs: acc.runs + (r.runs || 0),
+          toolCalls: acc.toolCalls + (r.toolCalls || 0),
+          inputTokens: acc.inputTokens + (r.inputTokens || 0),
+          outputTokens: acc.outputTokens + (r.outputTokens || 0),
+        }),
+        { runs: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0 },
+      )
+      const uGrid = document.getElementById('llm-usage-grid')
+      uGrid.textContent = ''
+      for (const [label, val] of [
+        ['7日模型调用', usageTotals.runs],
+        ['7日工具调用', usageTotals.toolCalls],
+        ['7日输入 Token', usageTotals.inputTokens],
+        ['7日输出 Token', usageTotals.outputTokens],
+      ]) {
+        const box = document.createElement('div')
+        box.className = 'stat-box'
+        const lbl = document.createElement('div')
+        lbl.className = 'muted'
+        lbl.textContent = label
+        const v = document.createElement('div')
+        v.className = 'stat-val'
+        v.textContent = String(val)
+        box.appendChild(lbl)
+        box.appendChild(v)
+        uGrid.appendChild(box)
+      }
+
+      selectedBuiltins = new Set(data.policy.enabledBuiltins || [])
+      selectedExternals = new Set(data.policy.enabledExternalTools || [])
+
+      const bBox = document.getElementById('builtin-tools-box')
+      bBox.textContent = ''
+      for (const t of data.builtinTools || []) {
+        const label = document.createElement('label')
+        label.className = 'btn'
+        const cb = document.createElement('input')
+        cb.type = 'checkbox'
+        cb.checked = selectedBuiltins.has(t.id)
+        cb.onchange = () => {
+          if (cb.checked) selectedBuiltins.add(t.id)
+          else selectedBuiltins.delete(t.id)
+        }
+        label.appendChild(cb)
+        const span = document.createElement('span')
+        span.style.marginLeft = '6px'
+        span.textContent = t.id + (t.requiresApiKey ? ' (需Key)' : '')
+        span.title = t.description
+        label.appendChild(span)
+        bBox.appendChild(label)
+      }
+
+      const eBox = document.getElementById('external-tools-box')
+      eBox.textContent = ''
+      if (!data.externalCatalog || !data.externalCatalog.length) {
+        const empty = document.createElement('span')
+        empty.className = 'muted'
+        empty.textContent = '当前未发现其他插件公开的 core.tools 工具。'
+        eBox.appendChild(empty)
+      } else {
+        for (const t of data.externalCatalog) {
+          const label = document.createElement('label')
+          label.className = 'btn'
+          const cb = document.createElement('input')
+          cb.type = 'checkbox'
+          cb.checked = selectedExternals.has(t.id)
+          cb.onchange = () => {
+            if (cb.checked) selectedExternals.add(t.id)
+            else selectedExternals.delete(t.id)
+          }
+          label.appendChild(cb)
+          const span = document.createElement('span')
+          span.style.marginLeft = '6px'
+          span.textContent = t.id + ' [' + t.sideEffect + ']'
+          span.title = t.description
+          label.appendChild(span)
+          eBox.appendChild(label)
+        }
+      }
+
+      const tLogs = document.getElementById('tool-logs-list')
+      tLogs.textContent = ''
+      if (!data.toolLogs || !data.toolLogs.length) {
+        tLogs.textContent = '暂无工具调用记录。'
+      } else {
+        for (const item of data.toolLogs.slice(0, 15)) {
+          const row = document.createElement('div')
+          row.className = 'mem-item'
+          const left = document.createElement('div')
+          left.textContent =
+            '[' + item.status + '] ' + item.toolId + ' (' + item.source + ') · ' +
+            item.latencyMs + 'ms' + (item.error ? ' · ' + item.error : '')
+          const right = document.createElement('div')
+          right.className = 'muted'
+          right.textContent = fmtTime(item.createdAt)
+          row.appendChild(left)
+          row.appendChild(right)
+          tLogs.appendChild(row)
+        }
+      }
+    }
+
+    document.getElementById('btn-save-tools').onclick = async () => {
+      const r = await bridge.fetch('/api/agent/policy', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          enabledBuiltins: [...selectedBuiltins],
+          enabledExternalTools: [...selectedExternals],
+        }),
+      })
+      const out = await r.json()
+      bridge.toast(out.ok ? '已保存工具白名单策略' : (out.error || '保存失败'), out.ok ? 'success' : 'error')
+    }
+
+    document.getElementById('btn-refresh').onclick = () => { loadOverview(); loadMemes(); loadVoiceOverview(); loadAgentOverview() }
     document.getElementById('btn-search-memes').onclick = loadMemes
     document.getElementById('meme-scope-filter').onchange = loadMemes
     document.getElementById('btn-sync-agent').onclick = async () => {
@@ -577,7 +725,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       loadMemories(activeGroupId)
     }
 
-    await Promise.all([loadOverview(), loadMemes(), loadVoiceOverview()])
+    await Promise.all([loadOverview(), loadMemes(), loadVoiceOverview(), loadAgentOverview()])
   </script>
 </body>
 </html>

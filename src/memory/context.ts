@@ -63,13 +63,45 @@ export function buildAssistantContextMessage(botName: string, replyText: string,
 
 export function pruneContextWindow(
   messages: readonly ContextMessage[],
-  config: Pick<SocialConfig, 'max_context_messages' | 'context_ttl_minutes'>,
+  config: Pick<SocialConfig, 'max_context_messages' | 'context_ttl_minutes'> & { context_max_tokens?: number },
   now = Date.now(),
 ): ContextMessage[] {
   const cutoff = now - config.context_ttl_minutes * 60_000
   const fresh = messages.filter((m) => m.ts >= cutoff)
   const maxItems = Math.max(1, config.max_context_messages)
-  return fresh.length > maxItems ? fresh.slice(fresh.length - maxItems) : fresh
+  const trimmed = fresh.length > maxItems ? fresh.slice(fresh.length - maxItems) : fresh
+  const maxTokens = config.context_max_tokens ?? 3000
+  return compressContextToTokenBudget(trimmed, maxTokens)
+}
+
+/** 轻量估算文本 Token 数（中文约 1.5 字/token，ASCII 约 4 字符/token） */
+export function estimateTokens(text: string): number {
+  let cjk = 0
+  let ascii = 0
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code >= 0x4e00 && code <= 0x9fff) cjk += 1
+    else ascii += 1
+  }
+  return Math.ceil(cjk / 1.5 + ascii / 4)
+}
+
+/** 超出 Token 预算时从最早消息开始压缩裁剪，始终保留至少最新 2 条语境 */
+export function compressContextToTokenBudget(
+  messages: readonly ContextMessage[],
+  maxTokens: number,
+): ContextMessage[] {
+  if (messages.length <= 2 || maxTokens <= 0) return [...messages]
+  const kept: ContextMessage[] = []
+  let tokens = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    const cost = estimateTokens(`${m.speakerName} ${m.text} ${m.quoteSummary ?? ''} ${m.imageSummary ?? ''}`) + 8
+    if (kept.length >= 2 && tokens + cost > maxTokens) break
+    kept.unshift(m)
+    tokens += cost
+  }
+  return kept
 }
 
 export function appendContextMessage(

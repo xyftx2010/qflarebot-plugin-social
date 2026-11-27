@@ -16,14 +16,53 @@ export type LLMContentPart =
 
 export type LLMMessageContent = string | LLMContentPart[]
 
+export interface LLMToolDefinition {
+  name: string
+  description?: string
+  parameters: Record<string, unknown>
+}
+
+export interface LLMToolCall {
+  id: string
+  name: string
+  arguments: string
+}
+
+export interface LLMThoughtSignature {
+  part_index: number
+  part_kind: 'text' | 'function_call'
+  signature: string
+  tool_call_index?: number
+  tool_call_id?: string
+  tool_name?: string
+}
+
+export interface LLMReasoningSignature {
+  part_index: number
+  block_type: 'thinking' | 'redacted_thinking'
+  thinking?: string
+  signature?: string
+  data?: string
+}
+
 export interface LLMChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content?: LLMMessageContent
+  tool_calls?: LLMToolCall[]
+  tool_call_id?: string
+  is_error?: boolean
+  reasoning?: string
+  thought_signatures?: LLMThoughtSignature[]
+  reasoning_signatures?: LLMReasoningSignature[]
 }
+
+export type LLMToolChoice = 'auto' | 'none' | 'required' | { name: string }
 
 export interface LLMChatRequest {
   model?: string
   messages: LLMChatMessage[]
+  tools?: LLMToolDefinition[]
+  tool_choice?: LLMToolChoice
   temperature?: number
   max_tokens?: number
   top_p?: number
@@ -41,6 +80,9 @@ export interface LLMUsage {
 export interface LLMChatResult {
   text: string
   reasoning?: string
+  tool_calls?: LLMToolCall[]
+  thought_signatures?: LLMThoughtSignature[]
+  reasoning_signatures?: LLMReasoningSignature[]
   finish_reason?: 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'other'
   alias: string
   provider: string
@@ -204,6 +246,26 @@ export interface SocialConfig {
   voice_cache_ttl_hours: number
   /** 估算费率（元 / 千字，仅用于后台费用统计参考） */
   voice_cost_per_1k_chars: number
+
+  // ---- V0.11.0 全托管 Social-Agent 能力 ----
+  /** 是否开启 Agent 工具调用能力（仅在 @机器人 / /ask 时按需启用，非@插话保持快通道） */
+  enable_agent_tools: boolean
+  /** 单次 Agent 对话最大工具循环步数（1 ~ 6） */
+  agent_max_tool_steps: number
+  /** 单次 Agent 对话最大工具调用总次数（1 ~ 12） */
+  agent_max_tool_calls: number
+  /** 单次工具调用超时（毫秒） */
+  tool_timeout_ms: number
+  /** Agent 软执行预算（毫秒，给 QQ 30s 硬限留出余量） */
+  agent_budget_ms: number
+  /** 短期上下文估算 Token 上限（超出自动压缩裁剪） */
+  context_max_tokens: number
+  /** 是否允许单聊（私聊）对话（与群聊记忆严格隔离） */
+  enable_c2c_chat: boolean
+  /** 可选联网搜索供应商（tavily / bocha） */
+  web_search_provider: 'tavily' | 'bocha'
+  /** 可选联网搜索 API Key（留空则不启用联网搜索工具） */
+  web_search_api_key: string
 }
 
 export interface PersonaDefinition {
@@ -437,4 +499,52 @@ export interface VoiceSynthesisResult {
   format: VoiceAudioFormat
   contentType: string
   sizeBytes: number
+}
+
+// ---------------------------------------------------------------------------
+// V1.0.0 Social-Agent 工具与提示词扩展模型
+// ---------------------------------------------------------------------------
+
+export interface AgentToolPolicy {
+  enabledBuiltins: string[]
+  enabledExternalTools: string[]
+  allowExternalWrites: boolean
+  updatedAt: number
+}
+
+export interface PromptFragmentRecord {
+  plugin: string
+  fragment: string
+  priority: number
+  enabled: boolean
+  updatedAt: number
+}
+
+export interface ToolDailyStat {
+  day: string
+  toolId: string
+  calls: number
+  successes: number
+  totalLatencyMs: number
+  updatedAt: number
+}
+
+export interface ToolExecutionLog {
+  id: string
+  groupId: string
+  toolId: string
+  source: 'builtin' | 'external'
+  status: 'success' | 'failed' | 'timeout' | 'denied'
+  latencyMs: number
+  error: string
+  createdAt: number
+}
+
+export interface LLMDailyUsage {
+  day: string
+  runs: number
+  toolCalls: number
+  inputTokens: number
+  outputTokens: number
+  updatedAt: number
 }

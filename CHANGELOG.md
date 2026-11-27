@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.11.0] - 2026-11-27
+
+### Added
+- **独立 Social Agent Engine（完全接管原生 Agent 群聊职责）**：
+  - 移除对 `qflarebot-plugin-agent` 的依赖，改为 `depends: { llm: '*', 'core.tools': 'optional' }`，支持在停用原生 Agent 后独立完成全部群聊与工具任务。
+  - 建立「快通道 / ReAct Agent Loop」双通道引擎（`src/agent/loop.ts`）：普通非 `@` 插话保持零工具快通道；`@机器人`、`/ask`（别名 `/问`）及可选单聊按需进入多步 Function Calling 循环，支持思考签名透传、步数/次数/软超时预算控制与重复工具调用死循环防护。
+  - 新增消息去重守卫与短期上下文 Token 预算自动压缩（`context_max_tokens`）。
+- **内置工具与 SDK v5 `core.tools` 统一接入**：
+  - 内置 8 个娱乐与日常查询工具（`src/agent/builtin-tools.ts`）：`social.get_time`、`social.weather`、`social.search_memory`、`social.search_memes`、`social.remember_fact`、`social.roll`、`social.web_search`（Tavily/Bocha）、`social.web_fetch`（SSRF 安全网页读取）。
+  - 完整接入框架 `core.tools`（`src/agent/external-tools.ts`）：严格遵循 `capture / list / describe / invoke` 官方契约，默认关闭外部工具、支持管理页白名单勾选与工具图片附件（`artifacts`）直接发送。
+- **生态兼容与管理后台升级**：
+  - 对外导出兼容的 `services.agent` 提示词服务（`registerPrompt / disablePrompt / clearPrompt / listPrompts`，不含已弃用的 `registerTool`）。
+  - 新增 Migration v4（`{tool_policy}`、`{prompt_fragments}`、`{tool_stats}`、`{tool_logs}`、`{llm_usage_stats}`），无损保留所有既有数据。
+  - 管理页（`/p/social/ui/`）新增「Social Agent 工具中心、7 日模型用量与工具执行日志」真实面板；新增 `/ask` 与 `/social tools` 命令、[`AGENTS.md`](./AGENTS.md) 与 [迁移报告](./docs/v0.11.0-migration-report.md)。
+
 ## [0.10.0] - 2026-11-27
 
 ### Added

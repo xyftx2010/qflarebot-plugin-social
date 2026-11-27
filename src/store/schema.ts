@@ -165,6 +165,54 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       `CREATE INDEX IF NOT EXISTS {voice_logs_grp_ts} ON {voice_logs}(group_id, created_at);`,
     ],
   },
+  {
+    version: 4,
+    name: 'v0.11.0_social_agent',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS {tool_policy} (
+        id TEXT PRIMARY KEY,
+        enabled_builtins_json TEXT NOT NULL,
+        enabled_external_json TEXT NOT NULL,
+        allow_external_writes INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      ) WITHOUT ROWID;`,
+      `CREATE TABLE IF NOT EXISTS {prompt_fragments} (
+        plugin TEXT PRIMARY KEY,
+        fragment TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL
+      ) WITHOUT ROWID;`,
+      `CREATE TABLE IF NOT EXISTS {tool_stats} (
+        day TEXT NOT NULL,
+        tool_id TEXT NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0,
+        successes INTEGER NOT NULL DEFAULT 0,
+        total_latency_ms INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (day, tool_id)
+      ) WITHOUT ROWID;`,
+      `CREATE TABLE IF NOT EXISTS {tool_logs} (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        tool_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        error TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+      ) WITHOUT ROWID;`,
+      `CREATE INDEX IF NOT EXISTS {tool_logs_ts} ON {tool_logs}(created_at);`,
+      `CREATE TABLE IF NOT EXISTS {llm_usage_stats} (
+        day TEXT PRIMARY KEY,
+        runs INTEGER NOT NULL DEFAULT 0,
+        tool_calls INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      ) WITHOUT ROWID;`,
+    ],
+  },
 ]
 
 export const SCHEMA_STATEMENTS: readonly string[] = [
