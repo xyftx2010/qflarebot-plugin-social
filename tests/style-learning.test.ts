@@ -20,6 +20,7 @@ import {
   runGroupLearningJob,
 } from '../src/learning/scheduler.js'
 import { runStyleLabComparison } from '../src/learning/feedback.js'
+import { ADMIN_PAGE_HTML } from '../src/admin/page.js'
 import { handleGroupChatEvent, resetDedupForTest } from '../src/chat/pipeline.js'
 import type { LLMChatRequest, LLMService } from '../src/types.js'
 import { createSqliteTestDB } from './helpers/sqlite-db.js'
@@ -396,5 +397,13 @@ describe('V0.12.0 Style Distillation, Culture Learning & Self-Evolution System',
     })
     expect(afterDeleteCompile.enabled).toBe(false)
     expect((await listDialogueExamples(ctx.db, 'grp-A')).length).toBe(0)
+  })
+
+  it('produces syntactically valid inline JavaScript in ADMIN_PAGE_HTML', () => {
+    const match = ADMIN_PAGE_HTML.match(/<script type="module">([\s\S]*?)<\/script>/)
+    expect(match).toBeTruthy()
+    const bodyWithoutImport = (match?.[1] ?? '').replace(/^\s*import\s+[^\n]+\n/m, '')
+    // 包装在 async 函数中校验语法（支持顶层 await），确保模板字符串转义无误
+    expect(() => new Function(`return (async () => {\n${bodyWithoutImport}\n})`)).not.toThrow()
   })
 })

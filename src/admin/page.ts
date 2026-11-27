@@ -208,7 +208,10 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
           <div id="learn-summary" class="muted" style="margin-top:4px">请输入或选择群 ID 查看本群风格档案、语料与热梗。</div>
         </div>
         <div class="row">
-          <input id="learn-group-id" type="text" placeholder="目标群 ID" style="width:180px" />
+          <select id="learn-group-select" style="min-width:180px">
+            <option value="">选择已有群（group_openid）</option>
+          </select>
+          <input id="learn-group-id" type="text" placeholder="或手动输入群 openid" style="width:180px" />
           <button id="btn-learn-load" class="btn btn-primary">加载本群学习状态</button>
           <button id="btn-learn-auth" class="btn">切换本群学习授权</button>
           <button id="btn-learn-run" class="btn">立即蒸馏候选版本</button>
@@ -309,6 +312,27 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
         ' · 保存期限：' + data.config.memeTtlDays + ' 天'
       renderStats(data.multimodalStats)
       renderGroups(data.groups, data.personas)
+      const sel = document.getElementById('learn-group-select')
+      if (sel) {
+        const prev = document.getElementById('learn-group-id').value.trim()
+        sel.textContent = ''
+        const defOpt = document.createElement('option')
+        defOpt.value = ''
+        defOpt.textContent = '选择已有群（group_openid）'
+        sel.appendChild(defOpt)
+        for (const g of data.groups || []) {
+          const opt = document.createElement('option')
+          opt.value = g.groupId
+          opt.textContent = g.groupId.slice(0, 16) + (g.groupId.length > 16 ? '…' : '')
+          if (g.groupId === prev) opt.selected = true
+          sel.appendChild(opt)
+        }
+        if (!prev && data.groups && data.groups.length > 0) {
+          sel.value = data.groups[0].groupId
+          document.getElementById('learn-group-id').value = data.groups[0].groupId
+          loadLearningOverview(data.groups[0].groupId)
+        }
+      }
     }
 
     function renderGroups(groups, personas) {
@@ -906,6 +930,13 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       }
     }
 
+    document.getElementById('learn-group-select').onchange = (e) => {
+      const val = e.target.value
+      if (val) {
+        document.getElementById('learn-group-id').value = val
+        loadLearningOverview(val)
+      }
+    }
     document.getElementById('btn-learn-load').onclick = () => loadLearningOverview()
     document.getElementById('btn-learn-auth').onclick = async () => {
       const gid = document.getElementById('learn-group-id').value.trim()
@@ -948,13 +979,13 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       }
       const file = fileInput.files[0]
       const text = await file.text()
-      const lines = text.split(/\r?\n/)
+      const lines = text.split(/\\r?\\n/)
       const chunkSize = fmt === 'json' ? lines.length : 300
       let totalAccepted = 0
       let totalSkipped = 0
       let sourceId = ''
       for (let i = 0; i < lines.length; i += chunkSize) {
-        const chunk = lines.slice(i, i + chunkSize).join('\n')
+        const chunk = lines.slice(i, i + chunkSize).join('\\n')
         if (!chunk.trim()) continue
         const r = await bridge.fetch('/api/learning/import', {
           method: 'POST',
