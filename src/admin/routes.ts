@@ -38,6 +38,7 @@ import { generateTestToneWav } from '../voice/probe.js'
 import { synthesizeSpeech } from '../voice/providers.js'
 import type { VoiceTriggerMode } from '../types.js'
 import { ADMIN_PAGE_HTML } from './page.js'
+import { createLearningRoutes } from './learning-routes.js'
 
 function jsonError(status: number, error: string): Response {
   return Response.json({ ok: false, error }, { status })
@@ -600,5 +601,6 @@ export function createAdminRoutes(): Route<SocialConfig>[] {
         return Response.json({ ok: result.synced, personaId: persona.id, ...result })
       },
     },
+    ...createLearningRoutes(),
   ]
 }

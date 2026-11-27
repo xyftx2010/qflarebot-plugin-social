@@ -39,6 +39,8 @@ import { handleGroupChatEvent } from './chat/pipeline.js'
 import { createSocialService, createSocialTools } from './chat/tools.js'
 import { createAdminRoutes } from './admin/routes.js'
 import { generateTestToneWavBase64 } from './voice/probe.js'
+import { cascadeDeleteCorpusAndInvalidate, runScheduledStyleLearning } from './learning/scheduler.js'
+import { getLearningGroupSettings, getPublishedStyleProfile } from './store/learning-db.js'
 
 const HELP_TEXT = [
   '拟人群聊（social v0.11.0 · 独立 Social Agent）命令：',
@@ -209,10 +211,24 @@ export default definePlugin<SocialConfig>({
           ? `${todayLlm.runs} 次调用 / ${todayLlm.toolCalls} 次工具 / ${todayLlm.inputTokens + todayLlm.outputTokens} tokens`
           : '今日暂无调用'
 
+        const [styleCfg, styleProfile] = await Promise.all([
+          getLearningGroupSettings(ctx.db, groupId),
+          getPublishedStyleProfile(ctx.db, groupId),
+        ])
+        const styleLine =
+          ctx.config.style_learning_enabled && styleCfg?.authorized
+            ? styleProfile
+              ? `开（已发布 v${styleProfile.version}，证据 ${styleProfile.evidenceCount} 条）`
+              : '已授权（等待积累语料生成首个候选版本）'
+            : ctx.config.style_learning_enabled
+              ? '未在本群开启授权'
+              : '关'
+
         return [
-          '【本群拟人聊天状态 v0.11.1 · 自适应 Social Agent】',
+          '【本群拟人聊天状态 v0.12.0 · 自适应 Social Agent】',
           `- 发言模式：${mode}`,
           `- 当前人格：${persona.name}（${persona.id}）`,
+          `- 群聊风格学习：${styleLine}`,
           `- 自适应路由：${ctx.config.enable_agent_tools && ctx.config.adaptive_agent_enabled ? `${ctx.config.agent_routing_mode}（非@工具:${ctx.config.agent_allow_non_mention ? '开' : '关'} / 自主升级:${ctx.config.agent_auto_escalate ? '开' : '关'} / Top-${ctx.config.agent_candidate_top_k}）` : '关'}`,
           `- 冷却时间：${cooldown} 秒（每分钟上限 ${ctx.config.max_replies_per_minute} 条）`,
           `- 非@全量消息权限：${nonAtDiag}`,
@@ -328,8 +344,13 @@ export default definePlugin<SocialConfig>({
       async handler({ session, ctx }) {
         await ensureSchema(ctx.db, ctx.logger)
         const deleted = await deleteMemberMemories(ctx.db, session.targetId, session.userId)
-        return deleted > 0
-          ? `已删除你在本群的 ${deleted} 条个人记忆。如需停止后续收集，可发送 /social privacy off。`
+        const cascade = await cascadeDeleteCorpusAndInvalidate(ctx, session.targetId, {
+          rawUserId: session.userId,
+          actor: 'member:forgetme',
+        })
+        const extra = cascade.deletedCorpus > 0 ? `并同步清理了 ${cascade.deletedCorpus} 条学习语料与派生数据。` : ''
+        return deleted > 0 || cascade.deletedCorpus > 0
+          ? `已删除你在本群的 ${deleted} 条个人记忆${extra}如需停止后续收集，可发送 /social privacy off。`
           : '我在本群目前没有关于你的个人记忆。如需停止后续收集，可发送 /social privacy off。'
       },
     },
@@ -346,16 +367,16 @@ export default definePlugin<SocialConfig>({
         if (!arg) {
           const cur = await getMemberPrivacy(ctx.db, groupId, session.userId)
           return cur?.optOut
-            ? '当前状态：已关闭本人在本群的记忆收集（privacy off）。发送 /social privacy on 可重新开启。'
-            : '当前状态：允许记录本人在本群的公开娱乐记忆（privacy on）。发送 /social privacy off 可关闭。'
+            ? '当前状态：已关闭本人在本群的记忆与风格学习收集（privacy off）。发送 /social privacy on 可重新开启。'
+            : '当前状态：允许记录本人在本群的公开娱乐记忆与脱敏风格学习（privacy on）。发送 /social privacy off 可关闭。'
         }
         if (arg === 'off' || arg === '关') {
           await setMemberOptOut(ctx.db, groupId, session.userId, true)
-          return '已为你关闭本群的个人记忆收集。如需同时清除已有记忆，请发送 /social forgetme。'
+          return '已为你关闭本群的个人记忆收集（同步停止风格学习采集）。如需同时清除已有数据，请发送 /social forgetme。'
         }
         if (arg === 'on' || arg === '开') {
           await setMemberOptOut(ctx.db, groupId, session.userId, false)
-          return '已为你开启本群的公开娱乐记忆收集。'
+          return '已为你开启本群的公开娱乐记忆与脱敏风格学习收集。'
         }
         return '用法：/social privacy <on|off>'
       },
@@ -614,6 +635,16 @@ export default definePlugin<SocialConfig>({
     'qq.c2c.message': async ({ session, ctx }) => {
       if (!ctx.config.enable_c2c_chat) return
       await handleGroupChatEvent(session, ctx)
+    },
+  },
+
+  cron: {
+    'style-learning': {
+      cron: '0 */6 * * *',
+      handler: async ({ ctx }) => {
+        await ensureSchema(ctx.db, ctx.logger)
+        await runScheduledStyleLearning(ctx)
+      },
     },
   },
 

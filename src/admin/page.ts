@@ -94,7 +94,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
     <div class="card">
       <div class="row between">
         <div>
-          <h1>拟人群聊（qflarebot-plugin-social v0.11.1 · 自适应 Social Agent）</h1>
+          <h1>拟人群聊（qflarebot-plugin-social v0.12.0 · 自适应 Agent & 群聊风格学习）</h1>
           <div id="summary" class="muted">正在加载运行状态...</div>
           <div id="mm-summary" class="muted" style="margin-top:4px"></div>
         </div>
@@ -199,6 +199,48 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
         </div>
       </div>
       <div id="memes-list" class="muted">正在加载表情包素材库...</div>
+    </div>
+
+    <div class="card">
+      <div class="row between" style="margin-bottom:10px">
+        <div>
+          <h2 style="margin:0">群聊风格学习中心（V0.12.0）</h2>
+          <div id="learn-summary" class="muted" style="margin-top:4px">请输入或选择群 ID 查看本群风格档案、语料与热梗。</div>
+        </div>
+        <div class="row">
+          <input id="learn-group-id" type="text" placeholder="目标群 ID" style="width:180px" />
+          <button id="btn-learn-load" class="btn btn-primary">加载本群学习状态</button>
+          <button id="btn-learn-auth" class="btn">切换本群学习授权</button>
+          <button id="btn-learn-run" class="btn">立即蒸馏候选版本</button>
+          <button id="btn-learn-purge" class="btn btn-danger">清除本群学习数据</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-bottom:10px">
+        <select id="learn-import-format">
+          <option value="txt">TXT（QQ 导出/对话）</option>
+          <option value="jsonl">JSONL</option>
+          <option value="json">JSON</option>
+          <option value="csv">CSV</option>
+        </select>
+        <input id="learn-import-file" type="file" accept=".txt,.csv,.json,.jsonl" />
+        <button id="btn-learn-import" class="btn btn-primary">脱敏并分块导入语料</button>
+      </div>
+      <div id="learn-import-status" class="muted" style="margin-bottom:12px"></div>
+
+      <div class="muted" style="margin-bottom:6px">风格档案版本（候选 / 已发布 / 冻结 / 回滚，含防删除复活校验）：</div>
+      <div id="learn-profiles" class="muted" style="margin-bottom:12px">暂无风格版本。</div>
+
+      <div class="muted" style="margin-bottom:6px">群内热梗知识库（状态可切换 active / blocked）：</div>
+      <div id="learn-memes" class="muted" style="margin-bottom:12px">暂无热梗记录。</div>
+
+      <div class="muted" style="margin-bottom:6px">风格实验室（A–E 同上下文对照，绝不发送到 QQ 群且不污染记忆/语料）：</div>
+      <div class="row" style="margin-bottom:8px">
+        <input id="lab-context" type="text" placeholder="可选上下文（如：群友A: 今天又加班了）" style="flex:1;min-width:220px" />
+        <input id="lab-message" type="text" placeholder="测试发言（如：太离谱了吧这也能加班）" style="flex:1;min-width:220px" />
+        <button id="btn-lab-run" class="btn btn-primary">运行 A–E 对比</button>
+      </div>
+      <div id="lab-results" class="muted">点击「运行 A–E 对比」查看不同风格层级的真实回复、耗时与 Token。</div>
     </div>
   </div>
 
@@ -760,6 +802,228 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       await bridge.fetch('/api/groups/' + encodeURIComponent(activeGroupId) + '/memories', { method: 'DELETE' })
       bridge.toast('已清空本群记忆', 'success')
       loadMemories(activeGroupId)
+    }
+
+    // ---- V0.12.0 群聊风格学习中心与风格实验室 ----
+    let currentLearnState = null
+
+    async function loadLearningOverview(groupId) {
+      const gid = (groupId || document.getElementById('learn-group-id').value || '').trim()
+      if (!gid) return
+      document.getElementById('learn-group-id').value = gid
+      const r = await bridge.fetch('/api/learning/overview?groupId=' + encodeURIComponent(gid))
+      const data = await r.json()
+      if (!data.ok) {
+        bridge.toast(data.error || '加载失败', 'error')
+        return
+      }
+      currentLearnState = data
+      const cs = data.corpusSummary || { total: 0, pending: 0, processed: 0, onlineCount: 0, importCount: 0 }
+      document.getElementById('learn-summary').textContent =
+        '全局开关：' + (data.globalEnabled ? '开' : '关') +
+        ' · 本群授权：' + (data.settings.authorized ? '已授权' : '未授权') +
+        ' · 冻结长期风格：' + (data.settings.freezeStable ? '是' : '否') +
+        ' · 当前发布版本：' + (data.published ? 'v' + data.published.version : '无') +
+        ' · 有效语料：' + cs.total + '（待学习 ' + cs.pending + ' / 在线 ' + cs.onlineCount + ' / 导入 ' + cs.importCount + '）' +
+        ' · 活跃样本：' + (data.examples || []).length
+
+      const pBox = document.getElementById('learn-profiles')
+      pBox.textContent = ''
+      if (!data.profiles || !data.profiles.length) {
+        pBox.textContent = '暂无风格版本，请先导入语料或点击「立即蒸馏候选版本」。'
+      } else {
+        for (const p of data.profiles) {
+          const row = document.createElement('div')
+          row.className = 'mem-item'
+          const info = document.createElement('div')
+          info.textContent =
+            'v' + p.version + ' [' + p.status + '] · 证据 ' + p.evidenceCount + ' 条 / ' + p.distinctSenders + ' 人 · 置信度 ' + p.confidence +
+            (p.stableStyle && p.stableStyle.toneSummary ? ' · ' + p.stableStyle.toneSummary : '')
+          const acts = document.createElement('div')
+          acts.className = 'row'
+          if (p.status !== 'published' && p.status !== 'invalidated') {
+            const btnPub = document.createElement('button')
+            btnPub.className = 'btn btn-primary'
+            btnPub.textContent = p.status === 'archived' ? '回滚到此版本' : '发布'
+            btnPub.onclick = async () => {
+              const res = await bridge.fetch('/api/learning/profiles/' + encodeURIComponent(p.profileId) + '/publish', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ groupId: gid }),
+              })
+              const out = await res.json()
+              bridge.toast(out.ok ? '已发布版本 v' + p.version : (out.error || '发布失败'), out.ok ? 'success' : 'error')
+              loadLearningOverview(gid)
+            }
+            acts.appendChild(btnPub)
+          }
+          if (p.status === 'candidate') {
+            const btnRej = document.createElement('button')
+            btnRej.className = 'btn'
+            btnRej.textContent = '拒绝'
+            btnRej.onclick = async () => {
+              await bridge.fetch('/api/learning/profiles/' + encodeURIComponent(p.profileId) + '/status', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ status: 'rejected' }),
+              })
+              loadLearningOverview(gid)
+            }
+            acts.appendChild(btnRej)
+          }
+          row.appendChild(info)
+          row.appendChild(acts)
+          pBox.appendChild(row)
+        }
+      }
+
+      const mBox = document.getElementById('learn-memes')
+      mBox.textContent = ''
+      if (!data.memes || !data.memes.length) {
+        mBox.textContent = '暂无群内热梗。'
+      } else {
+        for (const m of data.memes.slice(0, 15)) {
+          const row = document.createElement('div')
+          row.className = 'mem-item'
+          const info = document.createElement('div')
+          info.textContent =
+            '「' + m.name + '」[' + m.status + '] ' + m.meaning + '（出现 ' + m.occurrenceCount + ' 次 / ' + m.distinctSenderCount + ' 人）'
+          const btnToggle = document.createElement('button')
+          btnToggle.className = 'btn'
+          btnToggle.textContent = m.status === 'active' ? '禁用' : '启用'
+          btnToggle.onclick = async () => {
+            await bridge.fetch('/api/learning/memes/' + encodeURIComponent(m.memeId), {
+              method: 'PUT',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ groupId: gid, status: m.status === 'active' ? 'blocked' : 'active' }),
+            })
+            loadLearningOverview(gid)
+          }
+          row.appendChild(info)
+          row.appendChild(btnToggle)
+          mBox.appendChild(row)
+        }
+      }
+    }
+
+    document.getElementById('btn-learn-load').onclick = () => loadLearningOverview()
+    document.getElementById('btn-learn-auth').onclick = async () => {
+      const gid = document.getElementById('learn-group-id').value.trim()
+      if (!gid) return bridge.toast('请先填写目标群 ID', 'error')
+      const nextAuth = !(currentLearnState && currentLearnState.groupId === gid && currentLearnState.settings.authorized)
+      await bridge.fetch('/api/learning/settings', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ groupId: gid, authorized: nextAuth }),
+      })
+      bridge.toast(nextAuth ? '已开启本群学习授权' : '已关闭本群学习授权', 'success')
+      loadLearningOverview(gid)
+    }
+    document.getElementById('btn-learn-run').onclick = async () => {
+      const gid = document.getElementById('learn-group-id').value.trim()
+      if (!gid) return bridge.toast('请先填写目标群 ID', 'error')
+      bridge.toast('正在蒸馏候选风格版本...', 'info')
+      const r = await bridge.fetch('/api/learning/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ groupId: gid, force: true }),
+      })
+      const out = await r.json()
+      bridge.toast(out.ok ? '已生成候选版本（样本 ' + out.processedCount + ' 条）' : (out.reason || '学习未执行'), out.ok ? 'success' : 'error')
+      loadLearningOverview(gid)
+    }
+    document.getElementById('btn-learn-purge').onclick = async () => {
+      const gid = document.getElementById('learn-group-id').value.trim()
+      if (!gid) return
+      await bridge.fetch('/api/learning/group/' + encodeURIComponent(gid), { method: 'DELETE' })
+      bridge.toast('已清空本群全部学习数据并失效缓存', 'success')
+      loadLearningOverview(gid)
+    }
+    document.getElementById('btn-learn-import').onclick = async () => {
+      const gid = document.getElementById('learn-group-id').value.trim()
+      const fileInput = document.getElementById('learn-import-file')
+      const fmt = document.getElementById('learn-import-format').value
+      if (!gid || !fileInput.files || !fileInput.files[0]) {
+        return bridge.toast('请先填写目标群 ID 并选择语料文件', 'error')
+      }
+      const file = fileInput.files[0]
+      const text = await file.text()
+      const lines = text.split(/\r?\n/)
+      const chunkSize = fmt === 'json' ? lines.length : 300
+      let totalAccepted = 0
+      let totalSkipped = 0
+      let sourceId = ''
+      for (let i = 0; i < lines.length; i += chunkSize) {
+        const chunk = lines.slice(i, i + chunkSize).join('\n')
+        if (!chunk.trim()) continue
+        const r = await bridge.fetch('/api/learning/import', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ groupId: gid, format: fmt, label: file.name, sourceId: sourceId || undefined, rawText: chunk }),
+        })
+        const out = await r.json()
+        if (!out.ok) {
+          bridge.toast(out.error || '导入失败', 'error')
+          break
+        }
+        sourceId = out.sourceId
+        totalAccepted += out.acceptedRows || 0
+        totalSkipped += out.skippedRows || 0
+        document.getElementById('learn-import-status').textContent =
+          '分块导入中… 已入库 ' + totalAccepted + ' 条，过滤/去重 ' + totalSkipped + ' 条'
+      }
+      document.getElementById('learn-import-status').textContent =
+        '导入完成：入库 ' + totalAccepted + ' 条，过滤/去重 ' + totalSkipped + ' 条（已自动脱敏与匿名化）'
+      bridge.toast('语料导入完成', 'success')
+      loadLearningOverview(gid)
+    }
+    document.getElementById('btn-lab-run').onclick = async () => {
+      const gid = document.getElementById('learn-group-id').value.trim()
+      const testContext = document.getElementById('lab-context').value.trim()
+      const testMessage = document.getElementById('lab-message').value.trim()
+      if (!gid || !testMessage) return bridge.toast('请填写目标群 ID 和测试发言', 'error')
+      const box = document.getElementById('lab-results')
+      box.textContent = '正在运行 A–E 五模式对照测试（不会发送到 QQ 群）...'
+      const r = await bridge.fetch('/api/learning/lab', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ groupId: gid, testContext, testMessage }),
+      })
+      const out = await r.json()
+      if (!out.ok) {
+        box.textContent = out.error || '运行失败'
+        return
+      }
+      box.textContent = ''
+      for (const item of out.results || []) {
+        const row = document.createElement('div')
+        row.className = 'mem-item'
+        const left = document.createElement('div')
+        left.textContent =
+          item.label + '：' + item.reply +
+          '（耗时 ' + item.latencyMs + 'ms / 检索 ' + item.retrievalMs + 'ms / 风格 ' + item.styleTokens + ' tok / 模型 ' + (item.inputTokens + item.outputTokens) + ' tok）'
+        const btnGood = document.createElement('button')
+        btnGood.className = 'btn'
+        btnGood.textContent = '标记优质'
+        btnGood.onclick = async () => {
+          await bridge.fetch('/api/learning/feedback', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              groupId: gid,
+              mode: item.mode,
+              contextExcerpt: testContext + ' ' + testMessage,
+              botReply: item.reply,
+              rating: 'good',
+              source: 'lab',
+            }),
+          })
+          bridge.toast('已记录优质反馈', 'success')
+        }
+        row.appendChild(left)
+        row.appendChild(btnGood)
+        box.appendChild(row)
+      }
     }
 
     await Promise.all([loadOverview(), loadMemes(), loadVoiceOverview(), loadAgentOverview()])

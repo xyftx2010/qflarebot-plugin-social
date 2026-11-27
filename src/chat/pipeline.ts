@@ -14,7 +14,10 @@ import type {
   VoiceLogRecord,
 } from '../types.js'
 import { ensureSchema } from '../store/schema.js'
-import { createEmptyGroupState, loadGroupChatSnapshot, saveGroupState } from '../store/db.js'
+import { createEmptyGroupState, getMemberPrivacy, loadGroupChatSnapshot, saveGroupState } from '../store/db.js'
+import { pruneExpiredLearningData } from '../store/learning-db.js'
+import { compileGroupStyleForChat } from '../learning/prompt-compiler.js'
+import { collectOnlineCorpusMessage } from '../learning/scheduler.js'
 import {
   createEmptyMultimodalState,
   getGroupMultimodalState,
@@ -210,6 +213,25 @@ async function runPostPersist(
         await pruneOldVoiceLogs(ctx.db, 14, now).catch(() => 0)
         await pruneOldToolLogs(ctx.db, 7, now).catch(() => 0)
         await pruneOldRoutingLogs(ctx.db, 7, now).catch(() => 0)
+        await pruneExpiredLearningData(ctx.db, now).catch(() => ({ corpus: 0, examples: 0 }))
+      }
+    }
+
+    // V0.12.0 在线增量语料异步采集（仅授权群、排除机器人与已退出成员，绝不阻塞实时回复）
+    if (session.scene === 'group' && ctx.config.style_learning_enabled && session.userId !== session.botId) {
+      const plainText = (session.displayContent ?? session.content ?? '').trim()
+      if (plainText) {
+        const privacy = await getMemberPrivacy(ctx.db, state.groupId, session.userId).catch(() => null)
+        await collectOnlineCorpusMessage({
+          ctx,
+          groupId: state.groupId,
+          userId: session.userId,
+          messageId: session.messageId || session.id || '',
+          content: plainText,
+          replyTo: session.quote?.messageId ?? '',
+          optedOut: Boolean(privacy?.optOut),
+          now,
+        }).catch(() => undefined)
       }
     }
 
@@ -456,9 +478,27 @@ export async function handleGroupChatEvent(
     availableCatalog.length > 0 &&
     (session.atMe || (ctx.config.agent_allow_non_mention && (ctx.config.agent_auto_daily_limit === 0 || autoAgentToday < ctx.config.agent_auto_daily_limit)))
 
+  const compiledStyle = isGroup
+    ? await compileGroupStyleForChat({
+        db: ctx.db,
+        groupId: conversationId,
+        config: ctx.config,
+        userText,
+        recentMessages: priorContext,
+        now,
+      })
+    : null
+
+  const voiceStyleHint =
+    compiledStyle?.voiceMoodHint && voicePromptHint
+      ? `群聊语音情绪倾向参考：${compiledStyle.voiceMoodHint}（保持当前已配置机器人音色）。`
+      : ''
+
   const baseSystemParts = [
     buildSocialSystemPrompt(persona, relevantMemories, session.botName),
+    compiledStyle?.promptBlock ?? '',
     voicePromptHint,
+    voiceStyleHint,
     ...promptFragments.map((f) => f.fragment),
   ].filter(Boolean)
 

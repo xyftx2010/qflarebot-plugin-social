@@ -286,6 +286,56 @@ export interface SocialConfig {
   agent_show_tool_progress: boolean
   /** 每群每日非 @ 自动工具路由次数上限（0 = 不限） */
   agent_auto_daily_limit: number
+
+  // ---- V0.12.0 群聊风格蒸馏、文化学习与自进化系统 ----
+  /** 是否开启群聊风格学习系统（需群级授权后生效，默认关闭） */
+  style_learning_enabled: boolean
+  /** 是否开启定时增量学习（复用 SDK v5 cron） */
+  style_auto_learn: boolean
+  /** 是否允许通过门禁的候选风格自动发布（默认关闭，推荐人工审核） */
+  style_auto_publish: boolean
+  /** 学习蒸馏专用模型别名（留空复用对话模型别名） */
+  style_learning_model_alias: string
+  /** 单批学习最大有效消息条数（20 ~ 400，默认 200） */
+  style_learning_batch_size: number
+  /** 触发自动学习的最低新增有效语料条数（20 ~ 300，默认 100） */
+  style_learning_min_messages: number
+  /** 定时增量学习扫描周期（小时，默认 6） */
+  style_learning_interval_hours: number
+  /** 近期风格观察窗口（天，默认 30） */
+  style_recent_window_days: number
+  /** 原始学习语料保存期限（天，默认 30，到期自动清理） */
+  style_corpus_retention_days: number
+  /** 长期稳定风格参考权重（0 ~ 1，默认 0.7） */
+  style_stable_weight: number
+  /** 近期动态风格参考权重（0 ~ 1，默认 0.3） */
+  style_recent_weight: number
+  /** 单成员语料采样权重上限（0.05 ~ 0.5，默认 0.2，小群自动适配） */
+  style_member_max_weight: number
+  /** 风格表达影响强度（0 ~ 1，默认 0.7） */
+  style_influence_strength: number
+  /** 对话示例检索条数上限（0 ~ 5，默认 5） */
+  style_retrieval_top_k: number
+  /** 同一热梗重复使用冷却轮数（默认 4） */
+  style_meme_cooldown_turns: number
+  /** 风格档案 Prompt Token 预算上限（默认 800） */
+  style_profile_max_tokens: number
+  /** 热梗文化 Prompt Token 预算上限（默认 400） */
+  style_meme_max_tokens: number
+  /** 对话示例 Prompt Token 预算上限（默认 800） */
+  style_examples_max_tokens: number
+  /** 风格系统总新增 Prompt Token 预算上限（默认 2000） */
+  style_total_max_tokens: number
+  /** 每日学习 LLM 调用次数预算上限（默认 20） */
+  style_daily_budget_runs: number
+  /** 可选向量检索开关（Phase 6，当前默认关闭，不可用时自动降级 D1） */
+  style_vector_enabled: boolean
+  /** 是否开启显式/隐式反馈评估记录 */
+  style_feedback_enabled: boolean
+  /** 强制排除机器人自身及其他机器人消息 */
+  style_exclude_bot_messages: boolean
+  /** 严格按群隔离风格、热梗与样本 */
+  style_group_isolation: boolean
 }
 
 export interface PersonaDefinition {

@@ -1,8 +1,10 @@
-# qflarebot-plugin-social (v0.11.1)
+# qflarebot-plugin-social (v0.12.0)
 
-基于 QFlareBot 官方插件框架（SDK 契约 v5）开发的 **自适应多模态拟人 Social Agent 插件**（自然群聊 + 自适应三通道路由 + 无感工具调用 + `core.tools` 生态接入 + 图片理解 + 表情包素材库 + AI 原生语音互动 + 长期记忆），可在停用官方 `qflarebot-plugin-agent` 后完全独立运行。
+基于 QFlareBot 官方插件框架（SDK 契约 v5）开发的 **自适应多模态拟人 Social Agent 插件**（自然群聊 + 自适应三通道路由 + 无感工具调用 + 群聊风格蒸馏与文化学习 + `core.tools` 生态接入 + 图片理解 + 表情包素材库 + AI 原生语音互动 + 长期记忆），可在停用官方 `qflarebot-plugin-agent` 后完全独立运行。
 
 ## 核心特性
+
+- **群聊风格蒸馏、文化学习与自进化（V0.12.0）**：支持 TXT/CSV/JSON/JSONL 脱敏分块导入与授权群在线增量采集；采用单成员 ≤ 20% 采样均衡、对话场景切分、长期/近期双层风格融合、多成员证据热梗库、D1 轻量 RAG 检索、2000 Token 硬预算动态 Prompt 编译与候选版本审核/回滚机制；提供只读 A–E 风格实验室（详见 [`docs/v0.12.0-architecture.md`](docs/v0.12.0-architecture.md)）。
 
 - **自适应三通道路由（Fast / Smart Tool / Full Agent）**：普通闲聊走零工具 Fast Chat（支持模型自主 `[[escalate]]` 升级与 `[[silence]]` 静默）；非 `@` 群聊中出现天气、时间、联网搜索、模糊追问等自然意图时自动进入 Smart Tool Chat（精选 ≤ 3 个候选工具）；多工具协作与 `/ask` 进入 Full Agent，严格遵守既有冷却与每日自动工具上限。
 - **内置工具 + SDK v5 `core.tools`**：内置时间、实时天气、联网搜索（Tavily/Bocha）、网页读取、抽签掷骰、群记忆/表情检索等 8 个低风险工具；自动发现其他插件公开的 `core.tools` 工具（默认白名单关闭）并支持工具图片附件直接交付。

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.0] - 2026-11-27
+
+### Added
+- **群聊风格蒸馏、文化学习与自进化系统（Migration v6）**：
+  - 输出 6 份正式设计文档（`docs/v0.12.0-source-audit.md`、`architecture.md`、`development-plan.md`、`database-migration.md`、`privacy-design.md`、`evaluation-plan.md`），基于 SDK v5 实际能力与 Migration v5 现状落地。
+  - **历史语料导入与清洗（Phase 1）**：支持 TXT（含 QQ 导出格式）、CSV、JSON、JSONL 与自定义字段映射分块导入；实现 SHA-256 发送者匿名化、手机号/邮箱/身份证/密钥/密码/联系方式/精确地址脱敏、提示词注入与机器人消息排除、上下文短词保留（如“典”“绷”“确实”）、跨来源去重、单成员 ≤ 20% 采样均衡（小群自适应）与对话场景切分。
+  - **风格蒸馏、热梗库与版本管理（Phase 2）**：实现程序客观特征统计 + 批量 LLM 语义蒸馏 + 严格白名单 Schema 校验；长期稳定风格（70%）与近期动态风格（30%）双层融合（支持冻结长期风格）；热梗知识库强制多成员证据校验防单人污染；候选版本默认人工审核发布，支持发布/冻结/拒绝/回滚与审计日志。
+  - **动态 Prompt Compiler 与 D1 轻量检索（Phase 3）**：9 级优先级编译风格提示词，硬约束 Token 预算（风格 800 / 热梗 400 / 示例 800 / 总计 2000），带版本缓存、重复表达检测与热梗冷却；采用 D1 CJK 二元组轻量检索（Phase 6 Vectorize 预留接口，不可用自动降级 D1）；Fast/Smart/Full 三通道与多模态/语音共享单次编译结果。
+  - **在线增量学习与隐私治理闭环（Phase 4–5 & 7）**：`ctx.waitUntil()` 异步采集授权群未退出成员语料，接入 SDK v5 `cron`（每 6 小时扫描，带租约并发锁、检查点与每日预算）；`/social forgetme` 与后台删除级联清理派生样本、重算热梗、标记受影响旧版本 `invalidated` 并禁止回滚复活。
+  - **后台学习中心与风格实验室**：`/p/social/ui/` 新增「群聊风格学习中心」与 A–E 五模式只读「风格实验室」（不发群、不污染上下文与语料，展示真实耗时与 Token）。
+  - 无损新增 Migration v6（`v0.12.0_style_learning_system`，10 张 `WITHOUT ROWID` 表）。
+
 ## [0.11.1] - 2026-11-27
 
 ### Added
