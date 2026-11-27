@@ -126,8 +126,13 @@ export function createLearningRoutes(): Route<SocialConfig>[] {
         const groupId = typeof body?.groupId === 'string' ? body.groupId.trim() : ''
         const format = body?.format
         const rawText = typeof body?.rawText === 'string' ? body.rawText : ''
-        if (!groupId || (format !== 'txt' && format !== 'csv' && format !== 'json' && format !== 'jsonl')) {
-          return jsonError(400, '参数无效：需要 groupId 与 format (txt/csv/json/jsonl)')
+        const rows = Array.isArray(body?.rows) ? body.rows : undefined
+        if (
+          !groupId ||
+          (format !== 'txt' && format !== 'csv' && format !== 'json' && format !== 'jsonl') ||
+          (!rawText && (!rows || rows.length === 0))
+        ) {
+          return jsonError(400, '参数无效：需要 groupId、format (txt/csv/json/jsonl) 以及 rawText 或 rows')
         }
         const groupCfg = await getLearningGroupSettings(ctx.db, groupId)
         const res = await importCorpusChunk({
@@ -136,7 +141,8 @@ export function createLearningRoutes(): Route<SocialConfig>[] {
           sourceId: typeof body?.sourceId === 'string' ? body.sourceId.trim() : undefined,
           format,
           label: typeof body?.label === 'string' ? body.label.trim() : undefined,
-          rawText,
+          rawText: rows ? undefined : rawText,
+          rows: rows as never,
           mapping: (body?.mapping as ImportFieldMapping | undefined) ?? undefined,
           timezoneOffsetMinutes: typeof body?.timezoneOffsetMinutes === 'number' ? body.timezoneOffsetMinutes : 480,
           blockedKeywords: ctx.config.blocked_keywords,

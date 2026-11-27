@@ -221,13 +221,20 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
 
       <div class="row" style="margin-bottom:10px">
         <select id="learn-import-format">
-          <option value="txt">TXT（QQ 导出/对话）</option>
+          <option value="json">JSON（支持百兆大文件流式分块）</option>
           <option value="jsonl">JSONL</option>
-          <option value="json">JSON</option>
+          <option value="txt">TXT（QQ 导出/对话）</option>
           <option value="csv">CSV</option>
+        </select>
+        <select id="learn-import-limit">
+          <option value="2000">最近 2,000 条（推荐，大文件秒级导入）</option>
+          <option value="5000">最近 5,000 条</option>
+          <option value="10000">最近 10,000 条</option>
+          <option value="0">全量流式导入（耗时较长）</option>
         </select>
         <input id="learn-import-file" type="file" accept=".txt,.csv,.json,.jsonl" />
         <button id="btn-learn-import" class="btn btn-primary">脱敏并分块导入语料</button>
+        <button id="btn-learn-stop" class="btn" style="display:none">停止导入</button>
       </div>
       <div id="learn-import-status" class="muted" style="margin-bottom:12px"></div>
 
@@ -970,43 +977,213 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       bridge.toast('已清空本群全部学习数据并失效缓存', 'success')
       loadLearningOverview(gid)
     }
+    let importAbortFlag = false
+    document.getElementById('btn-learn-stop').onclick = () => {
+      importAbortFlag = true
+      bridge.toast('正在停止导入...', 'info')
+    }
+
+    function extractSimpleRowFromObj(obj) {
+      if (!obj || typeof obj !== 'object') return null
+      // 兼容常见 QQ 导出 JSON 结构（含纯字段、nested sender/content 数组等）
+      let content = ''
+      const rawContent = obj.content ?? obj.text ?? obj.message ?? obj.msg ?? obj.raw_message
+      if (typeof rawContent === 'string') {
+        content = rawContent
+      } else if (Array.isArray(rawContent)) {
+        content = rawContent
+          .map((seg) => (typeof seg === 'string' ? seg : (seg && (seg.text || seg.content || (seg.data && seg.data.text))) || ''))
+          .join(' ')
+      } else if (rawContent && typeof rawContent === 'object') {
+        content = String(rawContent.text || rawContent.content || '')
+      }
+      content = content.trim()
+      if (!content) return null
+      let sender = 'anon'
+      if (typeof obj.sender === 'string') sender = obj.sender
+      else if (obj.sender && typeof obj.sender === 'object') sender = String(obj.sender.uin || obj.sender.uid || obj.sender.id || obj.sender.nickname || obj.sender.name || 'anon')
+      else sender = String(obj.user_id || obj.uid || obj.uin || obj.author || obj.user || obj.nickname || obj.name || 'anon')
+      const rawTs = obj.timestamp ?? obj.time ?? obj.date ?? obj.created_at ?? obj.msgTime
+      let ts = Date.now()
+      if (typeof rawTs === 'number' && Number.isFinite(rawTs)) ts = rawTs > 1e12 ? rawTs : rawTs * 1000
+      else if (typeof rawTs === 'string' && rawTs.trim()) {
+        const parsed = Date.parse(rawTs.trim().replace(' ', 'T'))
+        if (Number.isFinite(parsed)) ts = parsed
+      }
+      const isBot = Boolean(obj.is_bot || obj.isBot || obj.bot || (obj.sender && obj.sender.bot))
+      return {
+        sender: sender.slice(0, 48),
+        content: content.slice(0, 400),
+        timestamp: Math.floor(ts),
+        messageId: String(obj.message_id || obj.msg_id || obj.id || '').slice(0, 64),
+        isBot,
+      }
+    }
+
+    // 流式扫描超大 JSON 文本片中的平级消息对象（绝不一次性 JSON.parse 整个 180MB 文件）
+    function scanJsonObjectsFromChunk(buf) {
+      const rows = []
+      let inStr = false
+      let esc = false
+      let depth = 0
+      let startIdx = -1
+      let lastConsumed = 0
+      for (let i = 0; i < buf.length; i += 1) {
+        const ch = buf[i]
+        if (inStr) {
+          if (esc) esc = false
+          else if (ch === '\\\\') esc = true
+          else if (ch === '"') inStr = false
+          continue
+        }
+        if (ch === '"') { inStr = true; continue }
+        if (ch === '{') {
+          if (depth === 0) startIdx = i
+          depth += 1
+        } else if (ch === '}') {
+          if (depth > 0) depth -= 1
+          if (depth === 0 && startIdx >= 0) {
+            const slice = buf.slice(startIdx, i + 1)
+            lastConsumed = i + 1
+            startIdx = -1
+            if (slice.length < 32000) {
+              try {
+                const parsed = JSON.parse(slice)
+                const row = extractSimpleRowFromObj(parsed)
+                if (row) rows.push(row)
+              } catch {}
+            }
+          }
+        }
+      }
+      const remainder = startIdx >= 0 ? buf.slice(startIdx) : buf.slice(lastConsumed)
+      return { rows, remainder: remainder.length > 65536 ? '' : remainder }
+    }
+
     document.getElementById('btn-learn-import').onclick = async () => {
       const gid = document.getElementById('learn-group-id').value.trim()
       const fileInput = document.getElementById('learn-import-file')
       const fmt = document.getElementById('learn-import-format').value
+      const maxRows = Number(document.getElementById('learn-import-limit').value || '2000')
       if (!gid || !fileInput.files || !fileInput.files[0]) {
-        return bridge.toast('请先填写目标群 ID 并选择语料文件', 'error')
+        return bridge.toast('请先选择目标群并选择语料文件', 'error')
       }
       const file = fileInput.files[0]
-      const text = await file.text()
-      const lines = text.split(/\\r?\\n/)
-      const chunkSize = fmt === 'json' ? lines.length : 300
-      let totalAccepted = 0
-      let totalSkipped = 0
-      let sourceId = ''
-      for (let i = 0; i < lines.length; i += chunkSize) {
-        const chunk = lines.slice(i, i + chunkSize).join('\\n')
-        if (!chunk.trim()) continue
-        const r = await bridge.fetch('/api/learning/import', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ groupId: gid, format: fmt, label: file.name, sourceId: sourceId || undefined, rawText: chunk }),
-        })
-        const out = await r.json()
-        if (!out.ok) {
-          bridge.toast(out.error || '导入失败', 'error')
-          break
+      const statusEl = document.getElementById('learn-import-status')
+      const btnImport = document.getElementById('btn-learn-import')
+      const btnStop = document.getElementById('btn-learn-stop')
+      importAbortFlag = false
+      btnImport.disabled = true
+      btnStop.style.display = 'inline-block'
+
+      try {
+        const fileSize = file.size
+        // 若选择“最近 N 条”且文件超大（> 10MB），直接从文件尾部切片读取（如最后 12MB），避免浏览器卡死且优先获取近期语料
+        const tailBytes = maxRows > 0 ? Math.max(8 * 1024 * 1024, maxRows * 2048) : fileSize
+        let offset = maxRows > 0 && fileSize > tailBytes ? fileSize - tailBytes : 0
+        const startOffset = offset
+        const sliceSize = 1024 * 1024 // 每次只读 1MB，绝不撑爆内存
+
+        let totalAccepted = 0
+        let totalSkipped = 0
+        let sourceId = ''
+        let carry = ''
+        let pendingRows = []
+        let pendingLines = []
+
+        const flushRows = async () => {
+          while (pendingRows.length > 0 && !importAbortFlag) {
+            const batch = pendingRows.splice(0, 200)
+            const r = await bridge.fetch('/api/learning/import', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ groupId: gid, format: fmt, label: file.name, sourceId: sourceId || undefined, rows: batch }),
+            })
+            const out = await r.json()
+            if (!out.ok) throw new Error(out.error || '导入失败')
+            sourceId = out.sourceId
+            totalAccepted += out.acceptedRows || 0
+            totalSkipped += out.skippedRows || 0
+            if (maxRows > 0 && totalAccepted >= maxRows) {
+              importAbortFlag = true
+              break
+            }
+          }
         }
-        sourceId = out.sourceId
-        totalAccepted += out.acceptedRows || 0
-        totalSkipped += out.skippedRows || 0
-        document.getElementById('learn-import-status').textContent =
-          '分块导入中… 已入库 ' + totalAccepted + ' 条，过滤/去重 ' + totalSkipped + ' 条'
+
+        const flushLines = async () => {
+          while (pendingLines.length > 0 && !importAbortFlag) {
+            const batchText = pendingLines.splice(0, 200).join('\\n')
+            if (!batchText.trim()) continue
+            const r = await bridge.fetch('/api/learning/import', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ groupId: gid, format: fmt, label: file.name, sourceId: sourceId || undefined, rawText: batchText }),
+            })
+            const out = await r.json()
+            if (!out.ok) throw new Error(out.error || '导入失败')
+            sourceId = out.sourceId
+            totalAccepted += out.acceptedRows || 0
+            totalSkipped += out.skippedRows || 0
+            if (maxRows > 0 && totalAccepted >= maxRows) {
+              importAbortFlag = true
+              break
+            }
+          }
+        }
+
+        while (offset < fileSize && !importAbortFlag) {
+          const end = Math.min(fileSize, offset + sliceSize)
+          const chunkText = await file.slice(offset, end).text()
+          offset = end
+
+          if (fmt === 'json') {
+            const scanned = scanJsonObjectsFromChunk(carry + chunkText)
+            carry = scanned.remainder
+            for (const row of scanned.rows) pendingRows.push(row)
+            if (pendingRows.length >= 200) await flushRows()
+          } else {
+            const parts = (carry + chunkText).split(/\\r?\\n/)
+            carry = end < fileSize ? (parts.pop() || '') : ''
+            if (fmt === 'jsonl') {
+              for (const line of parts) {
+                const t = line.trim()
+                if (!t) continue
+                try {
+                  const row = extractSimpleRowFromObj(JSON.parse(t))
+                  if (row) pendingRows.push(row)
+                } catch {}
+              }
+              if (pendingRows.length >= 200) await flushRows()
+            } else {
+              for (const line of parts) pendingLines.push(line)
+              if (pendingLines.length >= 200) await flushLines()
+            }
+          }
+
+          const pct = Math.min(100, Math.round(((offset - startOffset) / Math.max(1, fileSize - startOffset)) * 100))
+          statusEl.textContent =
+            '流式分块导入中（' + pct + '%）… 已入库 ' + totalAccepted + ' 条，过滤/去重 ' + totalSkipped + ' 条'
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+
+        if (!importAbortFlag) {
+          if (pendingRows.length > 0) await flushRows()
+          if (pendingLines.length > 0) await flushLines()
+        }
+
+        statusEl.textContent =
+          (importAbortFlag && maxRows > 0 && totalAccepted >= maxRows ? '已达到导入上限并完成：' : importAbortFlag ? '已手动停止：' : '导入完成：') +
+          '入库 ' + totalAccepted + ' 条，过滤/去重 ' + totalSkipped + ' 条（文件 ' + Math.round(fileSize / 1024 / 1024) + 'MB，已自动脱敏与匿名化）'
+        bridge.toast('语料导入完成（入库 ' + totalAccepted + ' 条）', 'success')
+        loadLearningOverview(gid)
+      } catch (err) {
+        statusEl.textContent = '导入出错：' + (err && err.message ? err.message : String(err))
+        bridge.toast('导入失败：' + (err && err.message ? err.message : String(err)), 'error')
+      } finally {
+        btnImport.disabled = false
+        btnStop.style.display = 'none'
       }
-      document.getElementById('learn-import-status').textContent =
-        '导入完成：入库 ' + totalAccepted + ' 条，过滤/去重 ' + totalSkipped + ' 条（已自动脱敏与匿名化）'
-      bridge.toast('语料导入完成', 'success')
-      loadLearningOverview(gid)
     }
     document.getElementById('btn-lab-run').onclick = async () => {
       const gid = document.getElementById('learn-group-id').value.trim()
