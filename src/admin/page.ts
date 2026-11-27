@@ -870,7 +870,8 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
           const info = document.createElement('div')
           info.textContent =
             'v' + p.version + ' [' + p.status + '] · 证据 ' + p.evidenceCount + ' 条 / ' + p.distinctSenders + ' 人 · 置信度 ' + p.confidence +
-            (p.stableStyle && p.stableStyle.toneSummary ? ' · ' + p.stableStyle.toneSummary : '')
+            (p.stableStyle && p.stableStyle.toneSummary ? ' · ' + p.stableStyle.toneSummary : '') +
+            (p.notes ? ' ｜ ' + p.notes : '')
           const acts = document.createElement('div')
           acts.className = 'row'
           if (p.status !== 'published' && p.status !== 'invalidated') {
