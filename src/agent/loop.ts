@@ -3,6 +3,7 @@ import type {
   AgentChannel,
   LLMChatMessage,
   LLMService,
+  LLMToolCall,
   LLMToolDefinition,
   SocialConfig,
   ToolExecutionLog,
@@ -57,6 +58,93 @@ function serializeToolResult(payload: unknown): string {
   return raw.length > 4000 ? `${raw.slice(0, 3990)}…(已截断)` : raw
 }
 
+const DSML_BLOCK_RE =
+  /<\s*[|｜\s]*DSML[|｜\s]*(?:function_)?calls[^>]*>[\s\S]*?<\/\s*[|｜\s]*DSML[|｜\s]*(?:function_)?calls\s*>/gi
+const DSML_INVOKE_RE =
+  /<\s*[|｜\s]*DSML[|｜\s]*invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/\s*[|｜\s]*DSML[|｜\s]*invoke\s*>/gi
+const DSML_PARAM_RE =
+  /<\s*[|｜\s]*DSML[|｜\s]*parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/\s*[|｜\s]*DSML[|｜\s]*parameter\s*>/gi
+const XML_TOOL_CALL_RE = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/gi
+const ANY_LEAKED_MARKUP_RE =
+  /<\s*\/?\s*[|｜\s]*DSML[|｜\s]*[^>]*>|<tool_call>[\s\S]*?<\/tool_call>|<function_calls>[\s\S]*?<\/function_calls>/gi
+
+/**
+ * 清理模型在纯文本中意外泄漏的 DeepSeek DSML / XML 工具调用标记，防止原样发到 QQ 群。
+ */
+export function sanitizeLeakedToolMarkup(raw: string): string {
+  if (!raw) return ''
+  return raw
+    .replace(DSML_BLOCK_RE, '')
+    .replace(DSML_INVOKE_RE, '')
+    .replace(XML_TOOL_CALL_RE, '')
+    .replace(ANY_LEAKED_MARKUP_RE, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/**
+ * 兜底解析部分模型（如 DeepSeek V3.2 / R1 或第三方兼容中转）在 content 中泄漏的 DSML / <tool_call> 调用。
+ */
+export function parseLeakedToolCalls(raw: string, stepIndex = 0): { calls: LLMToolCall[]; cleanedText: string } {
+  if (!raw || (!/DSML/i.test(raw) && !raw.includes('<tool_call>'))) {
+    return { calls: [], cleanedText: raw.trim() }
+  }
+
+  const calls: LLMToolCall[] = []
+  let idx = 0
+
+  DSML_INVOKE_RE.lastIndex = 0
+  let invokeMatch: RegExpExecArray | null
+  while ((invokeMatch = DSML_INVOKE_RE.exec(raw)) !== null) {
+    const name = (invokeMatch[1] ?? '').trim()
+    const body = invokeMatch[2] ?? ''
+    if (!name) continue
+    const args: Record<string, unknown> = {}
+    DSML_PARAM_RE.lastIndex = 0
+    let paramMatch: RegExpExecArray | null
+    while ((paramMatch = DSML_PARAM_RE.exec(body)) !== null) {
+      const pName = (paramMatch[1] ?? '').trim()
+      const pVal = (paramMatch[2] ?? '').trim()
+      if (!pName) continue
+      if (pVal === 'true') args[pName] = true
+      else if (pVal === 'false') args[pName] = false
+      else if (/^-?\d+(?:\.\d+)?$/.test(pVal)) args[pName] = Number(pVal)
+      else args[pName] = pVal
+    }
+    idx += 1
+    calls.push({
+      id: `dsml_${stepIndex}_${idx}`,
+      name,
+      arguments: JSON.stringify(args),
+    })
+  }
+
+  if (calls.length === 0) {
+    XML_TOOL_CALL_RE.lastIndex = 0
+    let xmlMatch: RegExpExecArray | null
+    while ((xmlMatch = XML_TOOL_CALL_RE.exec(raw)) !== null) {
+      try {
+        const parsed = JSON.parse(xmlMatch[1] ?? '{}') as { name?: string; arguments?: unknown }
+        if (typeof parsed.name === 'string' && parsed.name.trim()) {
+          idx += 1
+          calls.push({
+            id: `xml_${stepIndex}_${idx}`,
+            name: parsed.name.trim(),
+            arguments: typeof parsed.arguments === 'string' ? parsed.arguments : JSON.stringify(parsed.arguments ?? {}),
+          })
+        }
+      } catch {
+        // 忽略无法解析的残缺 JSON
+      }
+    }
+  }
+
+  return {
+    calls,
+    cleanedText: sanitizeLeakedToolMarkup(raw),
+  }
+}
+
 /**
  * 统一 Social Agent 执行引擎（V0.11.1 三通道复用版）：
  * - Fast Chat（toolDefs 为空）：1 次 llm.chat()，零工具 Schema 开销；
@@ -87,7 +175,7 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
     usage.inputTokens += res.usage?.input_tokens ?? 0
     usage.outputTokens += res.usage?.output_tokens ?? 0
     return {
-      text: (res.text ?? '').trim(),
+      text: sanitizeLeakedToolMarkup(res.text ?? ''),
       artifacts,
       toolLogs,
       usage,
@@ -123,10 +211,19 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
     usage.inputTokens += res.usage?.input_tokens ?? 0
     usage.outputTokens += res.usage?.output_tokens ?? 0
 
-    const calls = res.tool_calls ?? []
+    let calls = res.tool_calls ?? []
+    let assistantText = (res.text ?? '').trim()
+    if (calls.length === 0 && assistantText) {
+      const recovered = parseLeakedToolCalls(assistantText, step)
+      if (recovered.calls.length > 0) {
+        calls = recovered.calls
+        assistantText = recovered.cleanedText
+      }
+    }
+
     if (calls.length === 0) {
       return {
-        text: (res.text ?? '').trim(),
+        text: sanitizeLeakedToolMarkup(assistantText),
         artifacts,
         toolLogs,
         usage,
@@ -136,7 +233,7 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
 
     history.push({
       role: 'assistant',
-      content: res.text || undefined,
+      content: assistantText || undefined,
       tool_calls: calls,
       ...(res.reasoning ? { reasoning: res.reasoning } : {}),
       ...(res.thought_signatures ? { thought_signatures: res.thought_signatures } : {}),
@@ -272,11 +369,19 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
     if (loopBroken) break
   }
 
-  // 步数/时间预算耗尽后做一次不带 tools 的收尾总结
+  // 步数/时间预算耗尽后做一次不带 tools 的收尾总结，明确禁止再输出工具/DSML 标签
+  const finalMessages: LLMChatMessage[] = [
+    ...history,
+    {
+      role: 'user',
+      content:
+        '[系统提示] 工具查询阶段已结束，请不要再调用任何工具，也不要输出任何 DSML、XML、JSON 或工具调用标记；请直接根据已有信息用自然口语回复群友。',
+    },
+  ]
   const finalTimeout = Math.max(4_000, Math.min(ctx.config.llm_timeout_ms, deadline - Date.now() + 4_000))
   const finalRes = await llm.chat({
     model,
-    messages: history,
+    messages: finalMessages,
     temperature: ctx.config.temperature,
     max_tokens: ctx.config.max_output_tokens,
     timeout_ms: finalTimeout,
@@ -285,8 +390,9 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
   usage.inputTokens += finalRes.usage?.input_tokens ?? 0
   usage.outputTokens += finalRes.usage?.output_tokens ?? 0
 
+  const sanitizedFinal = sanitizeLeakedToolMarkup(finalRes.text ?? '')
   return {
-    text: (finalRes.text ?? '').trim(),
+    text: sanitizedFinal || (usage.toolFailures > 0 ? '刚刚查了一圈没查到准确结果，换个大一点的城市名再问我试试？' : ''),
     artifacts,
     toolLogs,
     usage,

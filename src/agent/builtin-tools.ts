@@ -220,14 +220,29 @@ export async function executeBuiltinTool(
       case 'social.weather': {
         const city = String(rawArgs.city ?? '').trim()
         if (!city) return { ok: false, output: null, error: '缺少城市名称 city' }
-        const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`
-        const geoRes = await fetchImpl(geoUrl, { signal: AbortSignal.timeout(timeoutMs) })
-        if (!geoRes.ok) return { ok: false, output: null, error: `城市查询失败 (HTTP ${geoRes.status})` }
-        const geoJson = (await geoRes.json()) as {
-          results?: Array<{ name: string; country?: string; latitude: number; longitude: number }>
+        const candidates = [city]
+        if (/[市区县]$/.test(city) && city.length > 2) {
+          candidates.push(city.replace(/[市区县]$/, ''))
+        } else if (/^[\u4e00-\u9fa5]{2,4}$/.test(city)) {
+          candidates.push(`${city}县`, `${city}市`)
         }
-        const loc = geoJson.results?.[0]
-        if (!loc) return { ok: false, output: null, error: `未找到城市「${city}」` }
+        let loc: { name: string; country?: string; latitude: number; longitude: number } | undefined
+        for (const cand of candidates) {
+          const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cand)}&count=1&language=zh&format=json`
+          const geoRes = await fetchImpl(geoUrl, { signal: AbortSignal.timeout(timeoutMs) })
+          if (!geoRes.ok) {
+            if (cand === city) return { ok: false, output: null, error: `城市查询失败 (HTTP ${geoRes.status})` }
+            continue
+          }
+          const geoJson = (await geoRes.json()) as {
+            results?: Array<{ name: string; country?: string; latitude: number; longitude: number }>
+          }
+          if (geoJson.results?.[0]) {
+            loc = geoJson.results[0]
+            break
+          }
+        }
+        if (!loc) return { ok: false, output: null, error: `未找到城市「${city}」，可尝试改查所属地级市` }
 
         const wxUrl = `https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&timezone=Asia%2FShanghai`
         const wxRes = await fetchImpl(wxUrl, { signal: AbortSignal.timeout(timeoutMs) })

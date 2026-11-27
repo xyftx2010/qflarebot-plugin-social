@@ -6,6 +6,7 @@ import { ensureSchema, resetSchemaReadyForTest } from '../src/store/schema.js'
 import { summarizeRoutingObservability } from '../src/store/agent-db.js'
 import { analyzeMessageIntent } from '../src/agent/intent-router.js'
 import { parseEscalationDirective } from '../src/agent/escalation.js'
+import { parseLeakedToolCalls, sanitizeLeakedToolMarkup } from '../src/agent/loop.js'
 import { handleGroupChatEvent, resetDedupForTest } from '../src/chat/pipeline.js'
 import type { ContextMessage, LLMChatRequest, LLMService } from '../src/types.js'
 import { createSqliteTestDB } from './helpers/sqlite-db.js'
@@ -347,5 +348,93 @@ describe('V0.11.1 adaptive 3-channel routing, context coreference, escalation & 
     expect(seenToolNames[0]).toEqual([])
     expect(seenToolNames[1]?.some((n) => n.includes('exec_shell') || n.includes('danger'))).toBe(false)
     expect(session.replies).toEqual(['这个我可帮不了，咱们聊点别的吧~'])
+  })
+
+  it('recovers and sanitizes leaked DeepSeek DSML tool-call markup instead of sending raw tags to QQ', async () => {
+    const rawDsml = `< | | DSML | | calls>
+< | | DSML | | invoke name="social_weather">
+< | | DSML | | parameter name="city" string="true">温州</ | | DSML | | parameter>
+</ | | DSML | | invoke>
+</ | | DSML | | calls>`
+
+    const parsed = parseLeakedToolCalls(rawDsml, 0)
+    expect(parsed.calls).toHaveLength(1)
+    expect(parsed.calls[0]?.name).toBe('social_weather')
+    expect(JSON.parse(parsed.calls[0]?.arguments ?? '{}')).toEqual({ city: '温州' })
+    expect(sanitizeLeakedToolMarkup(rawDsml)).toBe('')
+
+    const db = createSqliteTestDB()
+    let step = 0
+    const llm: LLMService = {
+      contractVersion: 1,
+      listModels: async () => [],
+      resolve: async () => ({
+        alias: 'chat',
+        provider: 'mock',
+        provider_name: 'Mock',
+        model: 'deepseek-chat',
+        capabilities: ['text', 'tools'],
+      }),
+      chat: vi.fn(async () => {
+        step += 1
+        if (step === 1) {
+          return {
+            text: rawDsml,
+            alias: 'chat',
+            provider: 'mock',
+            model: 'deepseek-chat',
+            latency_ms: 30,
+          }
+        }
+        return {
+          text: '苍南这边参考温州现在多云 18 度，挺暖和的！',
+          alias: 'chat',
+          provider: 'mock',
+          model: 'deepseek-chat',
+          latency_ms: 30,
+        }
+      }),
+    }
+
+    const mockFetch = vi.fn(async (url: string) => {
+      if (url.includes('geocoding-api.open-meteo.com')) {
+        return Response.json({ results: [{ name: '温州', country: '中国', latitude: 28.0, longitude: 120.7 }] })
+      }
+      return Response.json({
+        current: { temperature_2m: 18, apparent_temperature: 17, relative_humidity_2m: 65, weather_code: 2, wind_speed_10m: 6 },
+      })
+    }) as unknown as typeof fetch
+
+    const ctx = createMockContext(plugin, {
+      config: {
+        ...defaultConfig,
+        cooldown_seconds: 0,
+        enable_meme_reply: false,
+        trigger_threshold: 20,
+        base_reply_probability: 1,
+      },
+      db,
+      services: { llm },
+    })
+    await ensureSchema(ctx.db)
+
+    const session = createMockSession({
+      scene: 'group',
+      event: 'qq.group.message',
+      targetId: 'grp-dsml',
+      messageId: 'msg-dsml-1',
+      content: '温州今天天气怎么样？',
+      atMe: false,
+    })
+    const out = await handleGroupChatEvent(session, ctx, {
+      now: () => 4_000_000,
+      random: () => 0.1,
+      fetchImpl: mockFetch,
+      awaitBackground: true,
+    })
+    expect(out.replied).toBe(true)
+    expect(out.toolCallsCount).toBe(1)
+    expect(session.replies).toEqual(['苍南这边参考温州现在多云 18 度，挺暖和的！'])
+    expect(String(session.replies[0])).not.toContain('DSML')
   })
 })
