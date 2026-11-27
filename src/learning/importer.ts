@@ -99,10 +99,35 @@ function mapObjectRow(
   const replyKey = mapping?.replyTo || 'reply_to'
   const botKey = mapping?.isBot || 'is_bot'
 
+  if (obj.sender === 0 || obj.sender_qq === 0 || obj.sender === '0') return null
   const sender = String(
-    obj[senderKey] ?? obj.sender ?? obj.user ?? obj.author ?? obj.nickname ?? obj.user_id ?? obj.uid ?? 'anon',
+    (mapping?.sender ? obj[mapping.sender] : undefined) ??
+      obj.sender_qq ??
+      obj.sender ??
+      obj.user ??
+      obj.author ??
+      obj.nickname ??
+      obj.user_id ??
+      obj.uid ??
+      'anon',
   ).trim()
-  const content = String(obj[contentKey] ?? obj.content ?? obj.text ?? obj.message ?? obj.msg ?? '').trim()
+  let content = ''
+  const rawContent = obj[contentKey] ?? obj.contents ?? obj.content ?? obj.text ?? obj.message ?? obj.msg
+  if (typeof rawContent === 'string') {
+    content = rawContent.trim()
+  } else if (Array.isArray(rawContent)) {
+    const parts: string[] = []
+    for (const seg of rawContent) {
+      if (Array.isArray(seg)) {
+        const tag = String(seg[0] ?? '')
+        const val = String(seg[1] ?? '').trim()
+        if (val && tag === '[文本]') parts.push(val)
+      } else if (typeof seg === 'string' && !/^\[(?:应用消息|提示|图片|语音|视频|文件)/.test(seg)) {
+        parts.push(seg)
+      }
+    }
+    content = parts.join(' ').replace(/\s+/g, ' ').trim()
+  }
   if (!content) return null
   const tsRaw = obj[tsKey] ?? obj.timestamp ?? obj.time ?? obj.date ?? obj.created_at
   const timestamp = parseTimestamp(tsRaw, tzOffsetMin, fallbackTs)

@@ -59,6 +59,17 @@ describe('V0.12.0 Style Distillation, Culture Learning & Self-Evolution System',
     const jsonlRows = parseCorpusText({ format: 'jsonl', rawText: jsonl })
     expect(jsonlRows).toHaveLength(2)
 
+    // 适配真实 QQ 导出器 JSON（contents: [["[文本]", "..."]]，自动跳过 sender=0、图片/语音/提示）
+    const qqExportJson = JSON.stringify([
+      { time: '2026-11-27 02:55:13', sender: 0, sender_qq: 0, contents: [['[提示]', '邀请机器人加入了群聊']] },
+      { time: '2026-11-27 03:03:20', sender: '群友A', sender_qq: 123456, contents: [['[文本]', '我超喜欢喝冰美式']] },
+      { time: '2026-11-27 03:15:34', sender: '群友A', sender_qq: 123456, contents: [['[图片]', 'D:\\chatpic\\a.gif']] },
+    ])
+    const qqRows = parseCorpusText({ format: 'json', rawText: qqExportJson })
+    expect(qqRows).toHaveLength(1)
+    expect(qqRows[0]?.content).toBe('我超喜欢喝冰美式')
+    expect(qqRows[0]?.sender).toBe('123456')
+
     // 脱敏校验
     const redacted = sanitizeCorpusText('联系我 13812345678 密钥 sk-abcdef1234567890 密码: mypass123')
     expect(redacted).not.toContain('13812345678')

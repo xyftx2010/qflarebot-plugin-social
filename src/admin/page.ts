@@ -232,6 +232,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
           <option value="10000">最近 10,000 条</option>
           <option value="0">全量流式导入（耗时较长）</option>
         </select>
+        <input id="learn-exclude-bots" type="text" placeholder="排除机器人昵称/QQ（逗号分隔，可选）" style="width:230px" />
         <input id="learn-import-file" type="file" accept=".txt,.csv,.json,.jsonl" />
         <button id="btn-learn-import" class="btn btn-primary">脱敏并分块导入语料</button>
         <button id="btn-learn-stop" class="btn" style="display:none">停止导入</button>
@@ -983,21 +984,44 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       bridge.toast('正在停止导入...', 'info')
     }
 
-    function extractSimpleRowFromObj(obj) {
+    function extractSimpleRowFromObj(obj, excludeBotSet) {
       if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
-      // 兼容常见 QQ 导出 JSON（标准字段、OneBot/NapCat、QQNT/QCE elements.textElement.content 等）
+      // 跳过系统提示（如 sender: 0 / sender_qq: 0）
+      if (obj.sender === 0 || obj.sender_qq === 0 || obj.sender === '0') return null
+
+      // 兼容常见 QQ 导出 JSON（含 contents: [["[文本]", "..."]]、标准字段、OneBot/NapCat、QQNT elements 等）
       let content = ''
-      const rawContent = obj.content ?? obj.text ?? obj.message ?? obj.msg ?? obj.raw_message ?? obj.rawMessage ?? obj.body ?? obj.plain
+      let replyTo = ''
+      const rawContent = obj.contents ?? obj.content ?? obj.text ?? obj.message ?? obj.msg ?? obj.raw_message ?? obj.rawMessage ?? obj.body ?? obj.plain
       if (typeof rawContent === 'string') {
         content = rawContent
       } else if (Array.isArray(rawContent)) {
-        content = rawContent
-          .map((seg) => {
-            if (typeof seg === 'string') return seg
-            if (!seg || typeof seg !== 'object') return ''
-            return String(seg.text || seg.content || (seg.data && seg.data.text) || (seg.textElement && seg.textElement.content) || '')
-          })
-          .join(' ')
+        const parts = []
+        for (const seg of rawContent) {
+          if (typeof seg === 'string') {
+            if (!/^\\[(?:应用消息|提示|图片|语音|视频|文件|转发)/.test(seg)) parts.push(seg)
+            continue
+          }
+          // 适配 [["[文本]", "内容"], ["[被引用的消息][文本]", "..."], ["[图片]", "..."]] 格式
+          if (Array.isArray(seg)) {
+            const tag = String(seg[0] || '')
+            const val = String(seg[1] || '').trim()
+            if (!val) continue
+            if (tag.includes('[被引用的消息]')) {
+              if (!replyTo && val !== '[动画表情]') replyTo = val.slice(0, 60)
+              continue
+            }
+            if (tag === '[文本]' || (!tag && val)) {
+              parts.push(val)
+            }
+            continue
+          }
+          if (seg && typeof seg === 'object') {
+            const txt = String(seg.text || seg.content || (seg.data && seg.data.text) || (seg.textElement && seg.textElement.content) || '')
+            if (txt) parts.push(txt)
+          }
+        }
+        content = parts.join(' ')
       } else if (rawContent && typeof rawContent === 'object') {
         content = String(rawContent.text || rawContent.content || rawContent.plain || '')
       }
@@ -1013,11 +1037,15 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
           })
           .join(' ')
       }
-      content = content.trim()
+      content = content.replace(/\\s+/g, ' ').trim()
       if (!content) return null
+      // 去掉开头的 @xxx 后如果是 /命令，直接跳过
+      const withoutLeadingAt = content.replace(/^(?:@\\S+\\s*)+/, '').trim()
+      if (/^\\/[a-zA-Z\\u4e00-\\u9fa5]/.test(withoutLeadingAt)) return null
+
       // 避免把外层嵌套对象或元数据对象误当成单条消息
       const hasSenderField = Boolean(
-        obj.sender || obj.senderUin || obj.senderUid || obj.sendMemberName || obj.sendNickName ||
+        obj.sender || obj.sender_qq || obj.senderUin || obj.senderUid || obj.sendMemberName || obj.sendNickName ||
         obj.user_id || obj.uid || obj.uin || obj.qq || obj.author || obj.user || obj.from || obj.nickname
       )
       const hasTimeField = Boolean(
@@ -1026,7 +1054,10 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       if (!hasSenderField && !hasTimeField) return null
 
       let sender = 'anon'
-      if (typeof obj.sender === 'string') sender = obj.sender
+      const senderName = typeof obj.sender === 'string' ? obj.sender.trim() : ''
+      const senderQq = obj.sender_qq !== undefined && obj.sender_qq !== null ? String(obj.sender_qq).trim() : ''
+      if (senderQq) sender = senderQq
+      else if (senderName) sender = senderName
       else if (obj.sender && typeof obj.sender === 'object') {
         sender = String(obj.sender.uin || obj.sender.uid || obj.sender.qq || obj.sender.id || obj.sender.nickname || obj.sender.name || 'anon')
       } else {
@@ -1035,6 +1066,10 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
           obj.sendMemberName || obj.sendNickName || obj.author || obj.user || obj.from || obj.nickname || obj.name || 'anon'
         )
       }
+      const isExcludedBot =
+        Boolean(obj.is_bot || obj.isBot || obj.bot || (obj.sender && obj.sender.bot)) ||
+        (excludeBotSet && (excludeBotSet.has(sender.toLowerCase()) || (senderName && excludeBotSet.has(senderName.toLowerCase())) || (senderQq && excludeBotSet.has(senderQq.toLowerCase()))))
+
       const rawTs = obj.timestamp ?? obj.msgTime ?? obj.time ?? obj.sendTime ?? obj.date ?? obj.created_at
       let ts = Date.now()
       if (typeof rawTs === 'number' && Number.isFinite(rawTs)) ts = rawTs > 1e12 ? rawTs : rawTs * 1000
@@ -1048,18 +1083,18 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
           if (Number.isFinite(parsed)) ts = parsed
         }
       }
-      const isBot = Boolean(obj.is_bot || obj.isBot || obj.bot || (obj.sender && obj.sender.bot))
       return {
         sender: sender.slice(0, 48),
         content: content.slice(0, 400),
         timestamp: Math.floor(ts),
         messageId: String(obj.message_id || obj.msgId || obj.msg_id || obj.id || '').slice(0, 64),
-        isBot,
+        replyTo: replyTo || undefined,
+        isBot: isExcludedBot,
       }
     }
 
     // 栈式流式扫描超大 JSON：支持顶层数组 [...]、外层包裹 { messages: [...] } 以及从文件尾部切片读取
-    function scanJsonObjectsFromChunk(buf) {
+    function scanJsonObjectsFromChunk(buf, excludeBotSet) {
       const rows = []
       let inStr = false
       let esc = false
@@ -1085,11 +1120,10 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
             const slice = buf.slice(startIdx, i + 1)
             try {
               const parsed = JSON.parse(slice)
-              const row = extractSimpleRowFromObj(parsed)
+              const row = extractSimpleRowFromObj(parsed, excludeBotSet)
               if (row) {
                 rows.push(row)
                 lastConsumed = i + 1
-                // 已经成功提取了一条完整消息，清理其内部的残留索引，只保留外层容器栈
                 while (openStack.length > 0 && openStack[openStack.length - 1] >= startIdx) {
                   openStack.pop()
                 }
@@ -1098,7 +1132,6 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
           }
         }
       }
-      // 保留末尾未闭合的片段供下一片拼接（最多保留 32KB）
       const keepFrom = openStack.length > 0 ? Math.max(lastConsumed, openStack[openStack.length - 1]) : lastConsumed
       const remainder = buf.slice(keepFrom)
       return { rows, remainder: remainder.length > 32768 ? remainder.slice(-16384) : remainder }
@@ -1109,6 +1142,10 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       const fileInput = document.getElementById('learn-import-file')
       const fmt = document.getElementById('learn-import-format').value
       const maxRows = Number(document.getElementById('learn-import-limit').value || '2000')
+      const excludeBotRaw = document.getElementById('learn-exclude-bots').value || ''
+      const excludeBotSet = new Set(
+        excludeBotRaw.split(/[,，\\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean)
+      )
       if (!gid || !fileInput.files || !fileInput.files[0]) {
         return bridge.toast('请先选择目标群并选择语料文件', 'error')
       }
@@ -1176,13 +1213,21 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
           }
         }
 
+        let isFirstTailSlice = offset > 0
         while (offset < fileSize && !importAbortFlag) {
           const end = Math.min(fileSize, offset + sliceSize)
-          const chunkText = await file.slice(offset, end).text()
+          let chunkText = await file.slice(offset, end).text()
           offset = end
 
+          // 尾部切片首片：对齐到下一个完整对象边界（如换行后的 {），避免切在字符串引号中间导致引号状态错位
+          if (isFirstTailSlice && fmt === 'json') {
+            isFirstTailSlice = false
+            const alignIdx = chunkText.search(/\\r?\\n\\s*\\{/)
+            if (alignIdx >= 0) chunkText = chunkText.slice(alignIdx)
+          }
+
           if (fmt === 'json') {
-            const scanned = scanJsonObjectsFromChunk(carry + chunkText)
+            const scanned = scanJsonObjectsFromChunk(carry + chunkText, excludeBotSet)
             carry = scanned.remainder
             for (const row of scanned.rows) pendingRows.push(row)
             if (pendingRows.length >= 200) await flushRows()
@@ -1194,7 +1239,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
                 const t = line.trim()
                 if (!t) continue
                 try {
-                  const row = extractSimpleRowFromObj(JSON.parse(t))
+                  const row = extractSimpleRowFromObj(JSON.parse(t), excludeBotSet)
                   if (row) pendingRows.push(row)
                 } catch {}
               }
