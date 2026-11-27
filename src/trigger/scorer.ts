@@ -3,6 +3,8 @@ export interface ScoreInput {
   callNames: readonly string[]
   baseProbability: number
   msSinceLastReply: number
+  /** 同位群友在机器人刚回复后的连续追问 */
+  isContinuousFollowup?: boolean
   /** 可注入随机源便于单元测试确定性断言 */
   random?: () => number
 }
@@ -53,6 +55,11 @@ export function scoreGroupMessage(input: ScoreInput): ScoreResult {
   if (BANTER_RE.test(text)) {
     score += 18
     reasons.push('banter')
+  }
+
+  if (input.isContinuousFollowup) {
+    score += 30
+    reasons.push('continuous-followup')
   }
 
   // 超过 3 分钟没说话时稍微提高互动意愿

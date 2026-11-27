@@ -113,4 +113,33 @@ describe('trigger/gate', () => {
     expect(rateLimited.shouldReply).toBe(false)
     expect(rateLimited.reason).toBe('rate-limited')
   })
+
+  it('replies immediately on first try for same-user continuous short follow-up after 3s', () => {
+    const state = createEmptyGroupState('g1')
+    state.recentMessages = [
+      { role: 'user', speakerKey: 'u-owner', speakerName: '群主', text: '济南今天天气怎么样呢', atMe: false, ts: 100_000 },
+      { role: 'assistant', speakerKey: 'bot', speakerName: '大肥銮', text: '济南现在晴，12.9度', atMe: false, ts: 102_000 },
+    ]
+    recordReplyRate(state, 102_000)
+
+    const session = createMockSession({
+      scene: 'group',
+      event: 'qq.group.message',
+      userId: 'u-owner',
+      content: '那苍南呢',
+      atMe: false,
+    })
+
+    // 刚回复完 6 秒内（仍小于默认 20s 冷却），且随机概率未命中（0.99），同人短追问仍应一次命中回复
+    const decision = evaluateTrigger({
+      session,
+      config: { ...defaultConfig, cooldown_seconds: 20, trigger_threshold: 45, base_reply_probability: 0.28 },
+      state,
+      callNames: ['大肥銮'],
+      now: 108_000,
+      random: () => 0.99,
+    })
+    expect(decision.shouldReply).toBe(true)
+    expect(decision.reason).toBe('score-pass')
+  })
 })

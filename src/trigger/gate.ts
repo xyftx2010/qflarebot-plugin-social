@@ -53,6 +53,20 @@ export interface GateOptions {
  * - 先拦截机器人自身消息与 `session.addressedToOthers`；
  * - 同群启用 Agent 且 `yield_at_to_agent: true` 时让渡 `@机器人` 消息，避免重复调用模型和重复回复。
  */
+const CONTINUOUS_FOLLOWUP_WINDOW_MS = 90_000
+const CONTINUOUS_FOLLOWUP_MIN_COOLDOWN_MS = 3_000
+const CONTINUOUS_FOLLOWUP_RE =
+  /^(?:那|还有|再|顺便|明天|后天|晚上|换成|换个|另外)|[?？]|(?:呢|吗|嘛|么|啥|多少|怎么|几点|周几)$/
+
+function isContinuousFollowup(session: Session, state: GroupState, text: string, now: number): boolean {
+  const recent = state.recentMessages
+  if (recent.length < 2) return false
+  const last = recent[recent.length - 1]
+  if (!last || last.role !== 'assistant' || now - last.ts > CONTINUOUS_FOLLOWUP_WINDOW_MS) return false
+  const prevUser = [...recent].slice(0, -1).reverse().find((m) => m.role === 'user')
+  if (!prevUser || !session.userId || prevUser.speakerKey !== session.userId) return false
+  return CONTINUOUS_FOLLOWUP_RE.test(text.trim())
+}
 function isOtherBotSender(session: Session): boolean {
   const raw = session.raw as { author?: { bot?: unknown } } | undefined
   return raw?.author?.bot === true
@@ -99,7 +113,12 @@ export function evaluateTrigger(opts: GateOptions): TriggerDecision {
     return { shouldReply: false, reason: 'at-only-mode', score: 0, recordContext: true }
   }
 
-  const cooldownMs = resolveEffectiveCooldownSeconds(config, settings) * 1000
+  const continuousFollowup = !session.atMe && isContinuousFollowup(session, state, text, now)
+
+  const rawCooldownMs = resolveEffectiveCooldownSeconds(config, settings) * 1000
+  const cooldownMs = continuousFollowup
+    ? Math.min(rawCooldownMs, CONTINUOUS_FOLLOWUP_MIN_COOLDOWN_MS)
+    : rawCooldownMs
   if (cooldownMs > 0 && state.lastReplyAt > 0 && now - state.lastReplyAt < cooldownMs) {
     return { shouldReply: false, reason: 'cooldown', score: 0, recordContext: true }
   }
@@ -117,6 +136,7 @@ export function evaluateTrigger(opts: GateOptions): TriggerDecision {
     callNames,
     baseProbability: resolveEffectiveProbability(config, settings),
     msSinceLastReply: state.lastReplyAt > 0 ? now - state.lastReplyAt : Number.MAX_SAFE_INTEGER,
+    isContinuousFollowup: continuousFollowup,
     random: opts.random,
   })
 
