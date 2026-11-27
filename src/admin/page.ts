@@ -984,49 +984,86 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
     }
 
     function extractSimpleRowFromObj(obj) {
-      if (!obj || typeof obj !== 'object') return null
-      // 兼容常见 QQ 导出 JSON 结构（含纯字段、nested sender/content 数组等）
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
+      // 兼容常见 QQ 导出 JSON（标准字段、OneBot/NapCat、QQNT/QCE elements.textElement.content 等）
       let content = ''
-      const rawContent = obj.content ?? obj.text ?? obj.message ?? obj.msg ?? obj.raw_message
+      const rawContent = obj.content ?? obj.text ?? obj.message ?? obj.msg ?? obj.raw_message ?? obj.rawMessage ?? obj.body ?? obj.plain
       if (typeof rawContent === 'string') {
         content = rawContent
       } else if (Array.isArray(rawContent)) {
         content = rawContent
-          .map((seg) => (typeof seg === 'string' ? seg : (seg && (seg.text || seg.content || (seg.data && seg.data.text))) || ''))
+          .map((seg) => {
+            if (typeof seg === 'string') return seg
+            if (!seg || typeof seg !== 'object') return ''
+            return String(seg.text || seg.content || (seg.data && seg.data.text) || (seg.textElement && seg.textElement.content) || '')
+          })
           .join(' ')
       } else if (rawContent && typeof rawContent === 'object') {
-        content = String(rawContent.text || rawContent.content || '')
+        content = String(rawContent.text || rawContent.content || rawContent.plain || '')
+      }
+      if (!content && Array.isArray(obj.elements)) {
+        content = obj.elements
+          .map((el) => {
+            if (!el || typeof el !== 'object') return ''
+            if (el.textElement && typeof el.textElement.content === 'string') return el.textElement.content
+            if (el.data && typeof el.data.text === 'string') return el.data.text
+            if (typeof el.text === 'string') return el.text
+            if (typeof el.content === 'string') return el.content
+            return ''
+          })
+          .join(' ')
       }
       content = content.trim()
       if (!content) return null
+      // 避免把外层嵌套对象或元数据对象误当成单条消息
+      const hasSenderField = Boolean(
+        obj.sender || obj.senderUin || obj.senderUid || obj.sendMemberName || obj.sendNickName ||
+        obj.user_id || obj.uid || obj.uin || obj.qq || obj.author || obj.user || obj.from || obj.nickname
+      )
+      const hasTimeField = Boolean(
+        obj.timestamp || obj.time || obj.msgTime || obj.date || obj.created_at || obj.sendTime
+      )
+      if (!hasSenderField && !hasTimeField) return null
+
       let sender = 'anon'
       if (typeof obj.sender === 'string') sender = obj.sender
-      else if (obj.sender && typeof obj.sender === 'object') sender = String(obj.sender.uin || obj.sender.uid || obj.sender.id || obj.sender.nickname || obj.sender.name || 'anon')
-      else sender = String(obj.user_id || obj.uid || obj.uin || obj.author || obj.user || obj.nickname || obj.name || 'anon')
-      const rawTs = obj.timestamp ?? obj.time ?? obj.date ?? obj.created_at ?? obj.msgTime
+      else if (obj.sender && typeof obj.sender === 'object') {
+        sender = String(obj.sender.uin || obj.sender.uid || obj.sender.qq || obj.sender.id || obj.sender.nickname || obj.sender.name || 'anon')
+      } else {
+        sender = String(
+          obj.senderUin || obj.senderUid || obj.user_id || obj.uid || obj.uin || obj.qq ||
+          obj.sendMemberName || obj.sendNickName || obj.author || obj.user || obj.from || obj.nickname || obj.name || 'anon'
+        )
+      }
+      const rawTs = obj.timestamp ?? obj.msgTime ?? obj.time ?? obj.sendTime ?? obj.date ?? obj.created_at
       let ts = Date.now()
       if (typeof rawTs === 'number' && Number.isFinite(rawTs)) ts = rawTs > 1e12 ? rawTs : rawTs * 1000
       else if (typeof rawTs === 'string' && rawTs.trim()) {
-        const parsed = Date.parse(rawTs.trim().replace(' ', 'T'))
-        if (Number.isFinite(parsed)) ts = parsed
+        const s = rawTs.trim()
+        if (/^\\d{10,13}$/.test(s)) {
+          const n = Number(s)
+          ts = n > 1e12 ? n : n * 1000
+        } else {
+          const parsed = Date.parse(s.replace(' ', 'T'))
+          if (Number.isFinite(parsed)) ts = parsed
+        }
       }
       const isBot = Boolean(obj.is_bot || obj.isBot || obj.bot || (obj.sender && obj.sender.bot))
       return {
         sender: sender.slice(0, 48),
         content: content.slice(0, 400),
         timestamp: Math.floor(ts),
-        messageId: String(obj.message_id || obj.msg_id || obj.id || '').slice(0, 64),
+        messageId: String(obj.message_id || obj.msgId || obj.msg_id || obj.id || '').slice(0, 64),
         isBot,
       }
     }
 
-    // 流式扫描超大 JSON 文本片中的平级消息对象（绝不一次性 JSON.parse 整个 180MB 文件）
+    // 栈式流式扫描超大 JSON：支持顶层数组 [...]、外层包裹 { messages: [...] } 以及从文件尾部切片读取
     function scanJsonObjectsFromChunk(buf) {
       const rows = []
       let inStr = false
       let esc = false
-      let depth = 0
-      let startIdx = -1
+      const openStack = []
       let lastConsumed = 0
       for (let i = 0; i < buf.length; i += 1) {
         const ch = buf[i]
@@ -1038,26 +1075,33 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
         }
         if (ch === '"') { inStr = true; continue }
         if (ch === '{') {
-          if (depth === 0) startIdx = i
-          depth += 1
+          openStack.push(i)
         } else if (ch === '}') {
-          if (depth > 0) depth -= 1
-          if (depth === 0 && startIdx >= 0) {
+          if (openStack.length === 0) continue
+          const startIdx = openStack.pop()
+          const len = i + 1 - startIdx
+          // 仅尝试解析合理大小的单条消息对象，跳过巨型根对象或极小碎片
+          if (len >= 20 && len <= 24000) {
             const slice = buf.slice(startIdx, i + 1)
-            lastConsumed = i + 1
-            startIdx = -1
-            if (slice.length < 32000) {
-              try {
-                const parsed = JSON.parse(slice)
-                const row = extractSimpleRowFromObj(parsed)
-                if (row) rows.push(row)
-              } catch {}
-            }
+            try {
+              const parsed = JSON.parse(slice)
+              const row = extractSimpleRowFromObj(parsed)
+              if (row) {
+                rows.push(row)
+                lastConsumed = i + 1
+                // 已经成功提取了一条完整消息，清理其内部的残留索引，只保留外层容器栈
+                while (openStack.length > 0 && openStack[openStack.length - 1] >= startIdx) {
+                  openStack.pop()
+                }
+              }
+            } catch {}
           }
         }
       }
-      const remainder = startIdx >= 0 ? buf.slice(startIdx) : buf.slice(lastConsumed)
-      return { rows, remainder: remainder.length > 65536 ? '' : remainder }
+      // 保留末尾未闭合的片段供下一片拼接（最多保留 32KB）
+      const keepFrom = openStack.length > 0 ? Math.max(lastConsumed, openStack[openStack.length - 1]) : lastConsumed
+      const remainder = buf.slice(keepFrom)
+      return { rows, remainder: remainder.length > 32768 ? remainder.slice(-16384) : remainder }
     }
 
     document.getElementById('btn-learn-import').onclick = async () => {
