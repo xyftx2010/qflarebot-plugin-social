@@ -288,17 +288,19 @@ export async function distillGroupStyleBatch(input: DistillBatchInput): Promise<
           },
         ],
         temperature: 0.3,
-        max_tokens: 1500,
-        timeout_ms: Math.max(25_000, config.llm_timeout_ms),
+        max_tokens: 4000,
+        timeout_ms: Math.max(28_000, config.llm_timeout_ms),
       })
       llmRuns += 1
       inputTokens += res.usage?.input_tokens ?? 0
       outputTokens += res.usage?.output_tokens ?? 0
 
-      const parsed = extractJsonObject(res.text ?? '')
+      const rawText = (res.text ?? '').trim()
+      const rawReasoning = (res.reasoning ?? '').trim()
+      const parsed = extractJsonObject(rawText) ?? extractJsonObject(rawReasoning)
       if (!parsed) {
-        const snippet = (res.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
-        llmNote = `（LLM 返回非标准 JSON，长度 ${(res.text ?? '').length}：${snippet || '空响应'}）`
+        const snippet = (rawText || rawReasoning).replace(/\s+/g, ' ').trim().slice(0, 80)
+        llmNote = `（LLM 未返回 JSON：text=${rawText.length}字 / reasoning=${rawReasoning.length}字 / outTok=${res.usage?.output_tokens ?? 0}${snippet ? ` · ${snippet}` : ''}）`
       } else {
         const llmStyle = validateStyleLayer(parsed.style, objective)
         semanticStyle = mergeStyleLayers(objective, llmStyle, true)
