@@ -8,6 +8,7 @@ import type {
   LLMService,
   ReplyStyle,
   SocialConfig,
+  VoiceLogRecord,
 } from '../types.js'
 import { ensureSchema } from '../store/schema.js'
 import { createEmptyGroupState, loadGroupChatSnapshot, saveGroupState } from '../store/db.js'
@@ -21,6 +22,12 @@ import {
   saveGroupMultimodalState,
   type MultimodalStatsDelta,
 } from '../store/multimodal-db.js'
+import {
+  countGroupVoiceSentToday,
+  getGroupVoiceSettings,
+  pruneExpiredVoiceCache,
+  pruneOldVoiceLogs,
+} from '../store/voice-db.js'
 import {
   appendContextMessage,
   buildAssistantContextMessage,
@@ -44,6 +51,13 @@ import { extractSessionImages } from '../vision/media.js'
 import { analyzeSessionImages } from '../vision/analyzer.js'
 import { pruneExpiredMemes, resolveMemeOutgoingImage } from '../meme/store.js'
 import { recordMemeReplyOutcome, selectMemeForReply } from '../meme/selector.js'
+import {
+  buildVoicePromptDirective,
+  decideVoiceReply,
+  parseVoiceDirective,
+  resolveEffectiveVoiceConfig,
+} from '../voice/decision.js'
+import { recordVoiceSendLog, synthesizeAndPrepareVoice } from '../voice/service.js'
 
 export interface PipelineOptions {
   now?: () => number
@@ -61,9 +75,10 @@ export interface PipelineOutcome {
   replyStyle?: ReplyStyle
   memeId?: string
   visionUsed?: boolean
+  voiceUsed?: boolean
+  voiceCached?: boolean
 }
 
-/** 结合当前消息与图片标签从活跃记忆中优先筛选最相关的群梗和历史事件 */
 function selectRelevantMemories(
   memories: readonly GroupMemory[],
   queryText: string,
@@ -100,13 +115,13 @@ async function runPostPersist(
     shouldExtractMemory: boolean
     statsDelta: MultimodalStatsDelta
     usedMemeId?: string
+    voiceLog?: Omit<VoiceLogRecord, 'id'>
   },
 ): Promise<void> {
-  const { now, shouldExtractMemory, statsDelta, usedMemeId } = opts
+  const { now, shouldExtractMemory, statsDelta, usedMemeId, voiceLog } = opts
   let dirty = opts.stateDirty
 
   try {
-    // 仅从用户显式文字提取长期记忆，绝不把视觉模型猜测写入长期记忆
     if (shouldExtractMemory && ctx.config.enable_memory) {
       const plainText = (session.displayContent ?? session.content ?? '').trim()
       const candidate = extractCandidateMemory(plainText)
@@ -125,9 +140,10 @@ async function runPostPersist(
       const pruneRes = await maybePruneGroupMemories(ctx.db, state, now)
       if (pruneRes.touched) {
         dirty = true
-        // 复用 10 分钟节流窗口顺手清理过期图片缓存与过期表情包
         await pruneExpiredImageCache(ctx.db, now).catch(() => 0)
         await pruneExpiredMemes(ctx, now).catch(() => 0)
+        await pruneExpiredVoiceCache(ctx.db, ctx.r2, now).catch(() => 0)
+        await pruneOldVoiceLogs(ctx.db, 14, now).catch(() => 0)
       }
     }
 
@@ -143,6 +159,10 @@ async function runPostPersist(
 
     if (usedMemeId) {
       await markMemeUsed(ctx.db, usedMemeId, now).catch(() => undefined)
+    }
+
+    if (voiceLog) {
+      await recordVoiceSendLog(ctx, voiceLog).catch(() => undefined)
     }
 
     await recordMultimodalStats(ctx.db, statsDelta, now)
@@ -164,8 +184,9 @@ function scheduleBackground(
 }
 
 /**
- * 群聊主处理管线（V0.5.0 多模态社交版）：
- * 1 次合批 D1 读取 -> 零成本触发判断 -> 按需图片理解 -> 记忆联动对话 -> 智能表情包决策 -> 异步后台落库。
+ * 群聊主处理管线（V0.10.0 多模态 + AI 语音版）：
+ * 1 次合批 D1 读取 -> 零成本触发判断 -> 按需图片理解 -> 单次 LLM 同时生成回复与语音情绪决策
+ * -> 文字 / 表情包 / 原生语音互斥发送（失败降级文字） -> 异步后台落库与清理。
  */
 export async function handleGroupChatEvent(
   session: Session,
@@ -218,7 +239,6 @@ export async function handleGroupChatEvent(
     stateDirty = true
   }
 
-  // 未触发回复：直接后台落库，绝不对未触发的图片无条件调用视觉模型
   if (!decision.shouldReply) {
     const bg = runPostPersist(ctx, session, state, null, settings, {
       now,
@@ -251,11 +271,16 @@ export async function handleGroupChatEvent(
   }
 
   const hasImages = extractSessionImages(session, ctx.config.max_vision_images).length > 0
+  const [loadedMmState, groupVoiceSettings] = await Promise.all([
+    hasImages || ctx.config.enable_meme_reply ? getGroupMultimodalState(ctx.db, groupId) : Promise.resolve(null),
+    ctx.config.tts_api_key.trim() ? getGroupVoiceSettings(ctx.db, groupId) : Promise.resolve(null),
+  ])
   if (hasImages || ctx.config.enable_meme_reply) {
-    mmState = (await getGroupMultimodalState(ctx.db, groupId)) ?? createEmptyMultimodalState(groupId, now)
+    mmState = loadedMmState ?? createEmptyMultimodalState(groupId, now)
   }
+  const effectiveVoice = resolveEffectiveVoiceConfig(ctx.config, groupVoiceSettings)
 
-  // 按需图片理解（仅在决定回复且含图片时执行）
+  // 按需图片理解
   let visionSummary = ''
   let visionNotes: string[] = []
   let visionTagsText = ''
@@ -275,7 +300,6 @@ export async function handleGroupChatEvent(
     visionUsed = vision.analyses.length > 0
     visionTagsText = vision.analyses.flatMap((a) => [a.analysis.mood, ...a.analysis.tags]).join(' ')
 
-    // 图片分析结果写入短期上下文，不写入长期记忆
     if (visionSummary && userMsg) {
       userMsg.imageSummary = truncateText(visionSummary, 140)
       stateDirty = true
@@ -284,12 +308,14 @@ export async function handleGroupChatEvent(
 
   const freshContext = pruneContextWindow(state.recentMessages, ctx.config, now)
   const userText = extractReadableText(session)
-  const relevantMemories = selectRelevantMemories(
-    snapshot.memories,
-    `${userText} ${visionTagsText}`,
-    10,
-  )
-  const systemPrompt = buildSocialSystemPrompt(persona, relevantMemories, session.botName)
+  const relevantMemories = selectRelevantMemories(snapshot.memories, `${userText} ${visionTagsText}`, 10)
+  const voicePromptHint = buildVoicePromptDirective(effectiveVoice)
+  const systemPrompt = [
+    buildSocialSystemPrompt(persona, relevantMemories, session.botName),
+    voicePromptHint,
+  ]
+    .filter(Boolean)
+    .join('\n\n')
   const transcript = formatContextTranscript(freshContext)
   const currentSpeaker = resolveSpeakerName(session)
 
@@ -310,7 +336,7 @@ export async function handleGroupChatEvent(
     { role: 'user', content: promptSections.join('\n') },
   ]
 
-  let replyText = ''
+  let rawReply = ''
   try {
     const result = await llm.chat({
       model: ctx.config.model_alias.trim() || undefined,
@@ -319,7 +345,7 @@ export async function handleGroupChatEvent(
       max_tokens: ctx.config.max_output_tokens,
       timeout_ms: ctx.config.llm_timeout_ms,
     })
-    replyText = (result.text ?? '').trim()
+    rawReply = (result.text ?? '').trim()
   } catch (err) {
     ctx.logger.warn('LLM 调用失败，已静默降级', {
       groupId,
@@ -335,6 +361,9 @@ export async function handleGroupChatEvent(
     await scheduleBackground(ctx, bg, opts.awaitBackground)
     return { replied: false, reason: 'llm-error', score: decision.score, replyStyle: 'none', visionUsed }
   }
+
+  const parsedVoice = parseVoiceDirective(rawReply)
+  const replyText = parsedVoice.cleanText
 
   if (!replyText) {
     const bg = runPostPersist(ctx, session, state, mmState, settings, {
@@ -361,12 +390,149 @@ export async function handleGroupChatEvent(
     return { replied: false, reason: 'blocked-output', score: decision.score, replyStyle: 'none', visionUsed }
   }
 
-  // 智能表情包回复决策（纯文本 / 纯表情包 / 文本 + 表情包）
+  // 1. 判断是否走原生语音回复（语音与文字/表情包互斥，绝不同时重复发送）
+  let voiceLog: Omit<VoiceLogRecord, 'id'> | undefined
+  if (effectiveVoice.enabled) {
+    const sentToday =
+      effectiveVoice.dailyLimit > 0 ? await countGroupVoiceSentToday(ctx.db, groupId, now) : 0
+    const voiceDecision = decideVoiceReply({
+      effective: effectiveVoice,
+      maxChars: ctx.config.voice_max_chars,
+      sentToday,
+      userText,
+      replyText,
+      aiRequestedVoice: parsedVoice.aiRequestedVoice,
+      aiEmotion: parsedVoice.emotion,
+      random: opts.random,
+    })
+
+    if (voiceDecision.useVoice) {
+      const prepared = await synthesizeAndPrepareVoice(ctx, {
+        groupId,
+        text: replyText,
+        voiceId: effectiveVoice.voiceId,
+        speed: effectiveVoice.speed,
+        emotion: voiceDecision.emotion,
+        now,
+        fetchImpl: opts.fetchImpl,
+      })
+
+      if (prepared.ok) {
+        const voiceSend = await session.reply({ media: prepared.media })
+        if (voiceSend.ok) {
+          recordReplyRate(state, now)
+          state.recentMessages = appendContextMessage(
+            freshContext,
+            buildAssistantContextMessage(session.botName, `[语音] ${replyText}`, now),
+            ctx.config,
+            now,
+          )
+          stateDirty = true
+          if (mmState) {
+            recordMemeReplyOutcome(mmState, null, ctx.config.meme_repeat_cooldown_seconds, now)
+            mmDirty = true
+          }
+          voiceLog = {
+            groupId,
+            provider: ctx.config.tts_provider,
+            model: ctx.config.tts_model,
+            voiceId: effectiveVoice.voiceId,
+            emotion: voiceDecision.emotion,
+            charCount: replyText.length,
+            estimatedCost: prepared.estimatedCost,
+            format: prepared.format,
+            cached: prepared.cached,
+            status: 'sent',
+            error: '',
+            createdAt: now,
+          }
+          const bg = runPostPersist(ctx, session, state, mmState, settings, {
+            now,
+            stateDirty,
+            mmDirty,
+            shouldExtractMemory: decision.recordContext,
+            statsDelta,
+            voiceLog,
+          })
+          await scheduleBackground(ctx, bg, opts.awaitBackground)
+          return {
+            replied: true,
+            reason: voiceDecision.reason,
+            score: decision.score,
+            replyText,
+            replyStyle: 'voice',
+            visionUsed,
+            voiceUsed: true,
+            voiceCached: prepared.cached,
+          }
+        }
+
+        // QQ 语音投递失败：记录日志并按配置降级为文字
+        const errMsg = `QQ 语音发送失败 (HTTP ${voiceSend.status}): ${voiceSend.error ?? ''}`
+        voiceLog = {
+          groupId,
+          provider: ctx.config.tts_provider,
+          model: ctx.config.tts_model,
+          voiceId: effectiveVoice.voiceId,
+          emotion: voiceDecision.emotion,
+          charCount: replyText.length,
+          estimatedCost: prepared.estimatedCost,
+          format: prepared.format,
+          cached: prepared.cached,
+          status: ctx.config.voice_fallback_to_text ? 'fallback_text' : 'failed',
+          error: errMsg,
+          createdAt: now,
+        }
+        if (!ctx.config.voice_fallback_to_text) {
+          const bg = runPostPersist(ctx, session, state, mmState, settings, {
+            now,
+            stateDirty,
+            mmDirty,
+            shouldExtractMemory: decision.recordContext,
+            statsDelta,
+            voiceLog,
+          })
+          await scheduleBackground(ctx, bg, opts.awaitBackground)
+          return { replied: false, reason: 'voice-send-failed', score: decision.score, replyStyle: 'none', visionUsed }
+        }
+      } else {
+        // TTS 合成失败：记录日志并按配置降级为文字
+        voiceLog = {
+          groupId,
+          provider: ctx.config.tts_provider,
+          model: ctx.config.tts_model,
+          voiceId: effectiveVoice.voiceId,
+          emotion: voiceDecision.emotion,
+          charCount: replyText.length,
+          estimatedCost: 0,
+          format: ctx.config.tts_audio_format,
+          cached: false,
+          status: ctx.config.voice_fallback_to_text ? 'fallback_text' : 'failed',
+          error: prepared.error,
+          createdAt: now,
+        }
+        if (!ctx.config.voice_fallback_to_text) {
+          const bg = runPostPersist(ctx, session, state, mmState, settings, {
+            now,
+            stateDirty,
+            mmDirty,
+            shouldExtractMemory: decision.recordContext,
+            statsDelta,
+            voiceLog,
+          })
+          await scheduleBackground(ctx, bg, opts.awaitBackground)
+          return { replied: false, reason: 'tts-failed', score: decision.score, replyStyle: 'none', visionUsed }
+        }
+      }
+    }
+  }
+
+  // 2. 文字 / 表情包回复路径（含语音失败降级）
   let replyStyle: ReplyStyle = 'text'
   let chosenMemeId: string | undefined
   let outgoing: OutgoingMessage = replyText
 
-  if (ctx.config.enable_meme_reply && mmState) {
+  if (!voiceLog && ctx.config.enable_meme_reply && mmState) {
     const candidates = await listAvailableMemesForGroup(
       ctx.db,
       groupId,
@@ -401,7 +567,6 @@ export async function handleGroupChatEvent(
   }
 
   let sendResult = await session.reply(outgoing)
-  // 若带图发送失败（例如媒体上传或权限受限），自动降级为纯文本回复
   if (!sendResult.ok && typeof outgoing !== 'string') {
     ctx.logger.warn('表情包发送失败，降级为纯文本回复', {
       groupId,
@@ -427,6 +592,7 @@ export async function handleGroupChatEvent(
       mmDirty,
       shouldExtractMemory: decision.recordContext,
       statsDelta,
+      voiceLog,
     })
     await scheduleBackground(ctx, bg, opts.awaitBackground)
     return { replied: false, reason: 'send-failed', score: decision.score, replyStyle: 'none', visionUsed }
@@ -457,16 +623,18 @@ export async function handleGroupChatEvent(
     shouldExtractMemory: decision.recordContext,
     statsDelta,
     usedMemeId: chosenMemeId,
+    voiceLog,
   })
   await scheduleBackground(ctx, bg, opts.awaitBackground)
 
   return {
     replied: true,
-    reason: decision.reason,
+    reason: voiceLog ? 'voice-fallback-text' : decision.reason,
     score: decision.score,
     replyText: recordedText,
     replyStyle,
     memeId: chosenMemeId,
     visionUsed,
+    voiceUsed: false,
   }
 }

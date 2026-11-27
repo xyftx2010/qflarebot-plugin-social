@@ -94,7 +94,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
     <div class="card">
       <div class="row between">
         <div>
-          <h1>拟人群聊（qflarebot-plugin-social v0.5.0）</h1>
+          <h1>拟人群聊（qflarebot-plugin-social v0.10.0）</h1>
           <div id="summary" class="muted">正在加载运行状态...</div>
           <div id="mm-summary" class="muted" style="margin-top:4px"></div>
         </div>
@@ -139,6 +139,20 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
         <button id="btn-add-memory" class="btn btn-primary">添加记忆</button>
       </div>
       <div id="memories-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>AI 语音互动（TTS 试听、费用统计与发送日志）</h2>
+      <div id="voice-summary" class="muted" style="margin-bottom:10px">正在加载语音配置...</div>
+      <div class="grid" id="voice-stats-grid" style="margin-bottom:12px"></div>
+      <div class="row" style="margin-bottom:10px">
+        <input id="voice-preview-text" type="text" value="哈哈，今晚群里这么热闹，我也来凑个热闹！" style="flex:1" />
+        <input id="voice-preview-emotion" type="text" placeholder="情绪（可选，如 happy）" style="width:160px" />
+        <button id="btn-voice-preview" class="btn btn-primary">语音试听</button>
+      </div>
+      <audio id="voice-preview-player" controls style="width:100%;display:none;margin-bottom:12px"></audio>
+      <div class="muted" style="margin-bottom:6px">最近语音发送日志（含缓存命中、降级与预估费用）：</div>
+      <div id="voice-logs-list" class="muted">暂无语音发送记录。</div>
     </div>
 
     <div class="card">
@@ -443,7 +457,93 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       }
     }
 
-    document.getElementById('btn-refresh').onclick = () => { loadOverview(); loadMemes() }
+    async function loadVoiceOverview() {
+      const res = await bridge.fetch('/api/voice/overview')
+      const data = await res.json()
+      if (!data.ok) return
+      const c = data.config
+      document.getElementById('voice-summary').textContent =
+        '状态：' + (c.enableVoice ? '已开启' : '未开启') +
+        ' · 供应商：' + c.provider +
+        ' · 模型：' + c.model +
+        ' · 音色：' + c.voiceId +
+        ' · 触发：' + c.triggerMode +
+        ' · Key：' + (c.hasApiKey ? '已设置' : '未设置') +
+        ' · 失败降级文字：' + (c.fallbackToText ? '开' : '关')
+
+      const vGrid = document.getElementById('voice-stats-grid')
+      vGrid.textContent = ''
+      const u = data.usage7d || {}
+      const vItems = [
+        ['7日语音发送', u.totalSent || 0],
+        ['缓存命中', u.totalCached || 0],
+        ['降级文字', u.totalFallback || 0],
+        ['累计字数', u.totalChars || 0],
+        ['预估费用(元)', u.totalEstimatedCost || 0],
+      ]
+      for (const [label, val] of vItems) {
+        const box = document.createElement('div')
+        box.className = 'stat-box'
+        const lbl = document.createElement('div')
+        lbl.className = 'muted'
+        lbl.textContent = label
+        const v = document.createElement('div')
+        v.className = 'stat-val'
+        v.textContent = String(val)
+        box.appendChild(lbl)
+        box.appendChild(v)
+        vGrid.appendChild(box)
+      }
+
+      const logBox = document.getElementById('voice-logs-list')
+      logBox.textContent = ''
+      if (!data.logs || !data.logs.length) {
+        logBox.textContent = '暂无语音发送记录。'
+        return
+      }
+      for (const item of data.logs.slice(0, 15)) {
+        const row = document.createElement('div')
+        row.className = 'mem-item'
+        const left = document.createElement('div')
+        left.textContent =
+          '[' + item.status + (item.cached ? '/缓存' : '') + '] ' +
+          item.provider + ' / ' + item.voiceId +
+          (item.emotion ? ' (' + item.emotion + ')' : '') +
+          ' · ' + item.charCount + '字 · ¥' + item.estimatedCost +
+          (item.error ? ' · ' + item.error : '')
+        const right = document.createElement('div')
+        right.className = 'muted'
+        right.textContent = fmtTime(item.createdAt)
+        row.appendChild(left)
+        row.appendChild(right)
+        logBox.appendChild(row)
+      }
+    }
+
+    document.getElementById('btn-voice-preview').onclick = async () => {
+      const text = document.getElementById('voice-preview-text').value.trim()
+      const emotion = document.getElementById('voice-preview-emotion').value.trim()
+      if (!text) return
+      bridge.toast('正在合成试听语音...', 'info')
+      const res = await bridge.fetch('/api/voice/preview', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text, emotion }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: '合成失败' }))
+        bridge.toast(err.error || '合成失败', 'error')
+        return
+      }
+      const blob = await res.blob()
+      const player = document.getElementById('voice-preview-player')
+      player.src = URL.createObjectURL(blob)
+      player.style.display = 'block'
+      player.play().catch(() => undefined)
+      bridge.toast('试听语音已就绪', 'success')
+    }
+
+    document.getElementById('btn-refresh').onclick = () => { loadOverview(); loadMemes(); loadVoiceOverview() }
     document.getElementById('btn-search-memes').onclick = loadMemes
     document.getElementById('meme-scope-filter').onchange = loadMemes
     document.getElementById('btn-sync-agent').onclick = async () => {
@@ -477,7 +577,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       loadMemories(activeGroupId)
     }
 
-    await Promise.all([loadOverview(), loadMemes()])
+    await Promise.all([loadOverview(), loadMemes(), loadVoiceOverview()])
   </script>
 </body>
 </html>

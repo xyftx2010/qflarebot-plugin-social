@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0] - 2026-11-27
+
+### Added
+- **QQ 原生 AI 语音互动**：
+  - 第一阶段实测验证通过：基于 QFlareBot 官方 SDK（`media.type = 'voice'`、`file_type = 3`、`msg_type = 7`）直接发送标准 WAV 音频，手机 QQ 原生语音条可正常播放，无需 SILK 转码、无需 FFmpeg 或 VPS。
+  - **统一 TTS Provider 接口**（`src/voice/providers.ts`）：支持 MiniMax Speech、阿里千问 TTS（DashScope）、OpenAI Compatible TTS，按各供应商真实能力适配参数；`tts_api_key` 强制 `writeOnly: true` 脱敏存储。
+  - **四种智能语音触发模式**（`src/voice/decision.ts`）：`manual` / `probability` / `ai`（同一次主对话 LLM 请求输出 `[[voice:情绪]]` 决定语音与情绪，零额外判断模型调用）/ `always`；语音与文字/表情包严格互斥不重复发送，失败自动降级文字。
+  - **资源与成本优化**（`src/voice/service.ts`、`src/store/voice-db.ts`）：短音频（≤ 350KB）直接 `base64` 上传，大音频走临时 R2 + `/p/social/voice/:cacheKey` 短期流式路由；支持相同文本与音色参数的短期缓存复用与过期自动清理、每群每日次数上限与单次字符数上限。
+  - **数据库 Migration v3**（`{group_voice_settings}`、`{voice_cache}`、`{voice_logs}`）：支持每群独立语音配置、费用预估统计与发送日志。
+  - **管理后台与命令扩展**：`/p/social/ui/` 新增 AI 语音互动统计、在线语音试听（`POST /api/voice/preview`）与最近发送日志；新增 `/social say`（别名 `/说`）与 `/social voicetest`。
+- **表情包跨群共享**：新增 `share_memes_across_groups` 配置（默认开启），所有群共享表情包素材库，同时保持群聊长期记忆与上下文的严格群级隔离。
+
 ## [0.5.0] - 2026-11-27
 
 ### Added

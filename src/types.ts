@@ -164,6 +164,46 @@ export interface SocialConfig {
   share_memes_across_groups: boolean
   /** 兼容项：是否允许群聊回复使用全局素材库 */
   use_global_meme_library: boolean
+
+  // ---- V0.10.0 AI 语音互动 ----
+  /** 语音回复总开关 */
+  enable_voice: boolean
+  /** TTS 供应商：minimax / qwen / openai */
+  tts_provider: TTSProviderType
+  /** TTS API 地址（留空使用对应供应商默认地址） */
+  tts_api_base_url: string
+  /** TTS API Key（面板 writeOnly 脱敏存储） */
+  tts_api_key: string
+  /** TTS 模型名 */
+  tts_model: string
+  /** 默认音色 ID */
+  tts_voice_id: string
+  /** 语速（0.5 ~ 2.0） */
+  tts_speed: number
+  /** 音调（-12 ~ 12，仅支持该参数的供应商生效） */
+  tts_pitch: number
+  /** 音量（0.1 ~ 10，仅支持该参数的供应商生效） */
+  tts_volume: number
+  /** 默认情绪（如 happy / calm / sad，留空为中性） */
+  tts_emotion: string
+  /** 音频格式（推荐 wav，已实测 QQ 原生可播） */
+  tts_audio_format: VoiceAudioFormat
+  /** TTS 请求超时（毫秒） */
+  tts_timeout_ms: number
+  /** 语音触发模式：manual / probability / ai / always */
+  voice_trigger_mode: VoiceTriggerMode
+  /** 概率触发模式下的语音发送概率（0 ~ 1） */
+  voice_probability: number
+  /** 每群每日最大语音条数（0 = 不限） */
+  voice_daily_limit_per_group: number
+  /** 单次语音最大字符数（超出自动降级文字，控制成本与体积） */
+  voice_max_chars: number
+  /** 语音发送失败时是否自动降级为文字回复 */
+  voice_fallback_to_text: boolean
+  /** 临时语音与去重缓存保存时长（小时，到期自动清理） */
+  voice_cache_ttl_hours: number
+  /** 估算费率（元 / 千字，仅用于后台费用统计参考） */
+  voice_cost_per_1k_chars: number
 }
 
 export interface PersonaDefinition {
@@ -321,11 +361,80 @@ export interface MultimodalDailyStats {
   updatedAt: number
 }
 
-export type ReplyStyle = 'none' | 'text' | 'meme' | 'text_and_meme'
+export type ReplyStyle = 'none' | 'text' | 'meme' | 'text_and_meme' | 'voice'
 
 export interface MemeSelectionDecision {
   style: ReplyStyle
   meme?: MemeRecord
   score: number
   reason: string
+}
+
+// ---------------------------------------------------------------------------
+// V0.10.0 AI 语音互动领域模型
+// ---------------------------------------------------------------------------
+
+export type TTSProviderType = 'minimax' | 'qwen' | 'openai'
+export type VoiceTriggerMode = 'manual' | 'probability' | 'ai' | 'always'
+export type VoiceAudioFormat = 'wav' | 'mp3'
+
+export interface GroupVoiceSettings {
+  groupId: string
+  enabled: boolean | null
+  triggerMode: VoiceTriggerMode | null
+  probability: number | null
+  voiceId: string | null
+  speed: number | null
+  emotion: string | null
+  dailyLimit: number | null
+  updatedAt: number
+}
+
+export interface VoiceCacheEntry {
+  cacheKey: string
+  provider: TTSProviderType
+  format: VoiceAudioFormat
+  contentType: string
+  sizeBytes: number
+  r2Key: string
+  createdAt: number
+  expiresAt: number
+}
+
+export interface VoiceLogRecord {
+  id: string
+  groupId: string
+  provider: TTSProviderType
+  model: string
+  voiceId: string
+  emotion: string
+  charCount: number
+  estimatedCost: number
+  format: VoiceAudioFormat
+  cached: boolean
+  status: 'sent' | 'fallback_text' | 'failed'
+  error: string
+  createdAt: number
+}
+
+export interface VoiceSynthesisRequest {
+  text: string
+  provider: TTSProviderType
+  apiBaseUrl: string
+  apiKey: string
+  model: string
+  voiceId: string
+  speed: number
+  pitch: number
+  volume: number
+  emotion: string
+  format: VoiceAudioFormat
+  timeoutMs: number
+}
+
+export interface VoiceSynthesisResult {
+  bytes: ArrayBuffer
+  format: VoiceAudioFormat
+  contentType: string
+  sizeBytes: number
 }

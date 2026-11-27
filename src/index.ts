@@ -13,6 +13,9 @@ import {
   upsertGroupSettings,
 } from './store/db.js'
 import { listAvailableMemesForGroup, listMultimodalStats } from './store/multimodal-db.js'
+import { countGroupVoiceSentToday, getGroupVoiceSettings } from './store/voice-db.js'
+import { resolveEffectiveVoiceConfig } from './voice/decision.js'
+import { recordVoiceSendLog, synthesizeAndPrepareVoice } from './voice/service.js'
 import { addGroupMemory, resolveMemoryTtlDays } from './memory/store.js'
 import { listAllPersonas, resolvePersona, syncPersonaToAgent } from './persona/manager.js'
 import { resolveEffectiveCooldownSeconds, resolveEffectiveMode } from './trigger/gate.js'
@@ -30,15 +33,17 @@ import { createAdminRoutes } from './admin/routes.js'
 import { generateTestToneWavBase64 } from './voice/probe.js'
 
 const HELP_TEXT = [
-  '拟人群聊（social v0.5.0）命令：',
-  '/social status — 查看本群状态、权限与多模态诊断',
+  '拟人群聊（social v0.10.0）命令：',
+  '/social status — 查看本群状态、权限与多模态/语音诊断',
   '/social persona [名称|off] — 查看/切换本群人格（群管理员）',
   '/social mode <auto|at|off> — 切换本群发言模式（群管理员）',
   '/social memory [list|add <内容>|clear] — 管理本群记忆（群管理员）',
   '/social forgetme（/忘掉我）— 删除本人在本群的全部记忆',
   '/social privacy <on|off> — 开启/关闭本人在本群的记忆收集',
   '/social collect [标签] [分类:xxx]（/收藏表情）— 收藏当前或引用消息中的表情包',
-  '/social memes [关键词|disable <id>|enable <id>|del <id>]（/表情库）— 搜索或管理本群表情库',
+  '/social memes [关键词|disable <id>|enable <id>|del <id>]（/表情库）— 搜索或管理表情包库',
+  '/social say <内容>（/说）— 手动发送原生语音消息',
+  '/social voicetest <wav-b64|wav-url|url> — 测试 QQ 原生语音发送（群管理员）',
   '/social sync — 将本群人格基调同步到 Agent 插件（群管理员）',
 ].join('\n')
 
@@ -94,7 +99,7 @@ export default definePlugin<SocialConfig>({
         await ensureSchema(ctx.db, ctx.logger)
         const groupId = session.targetId
         const now = Date.now()
-        const [settings, state, memories, memes, stats] = await Promise.all([
+        const [settings, state, memories, memes, stats, groupVoice, voiceToday] = await Promise.all([
           getGroupSettings(ctx.db, groupId),
           getGroupState(ctx.db, groupId),
           listActiveGroupMemories(ctx.db, groupId, now, 60),
@@ -107,7 +112,10 @@ export default definePlugin<SocialConfig>({
             ctx.config.share_memes_across_groups,
           ),
           listMultimodalStats(ctx.db, 1),
+          getGroupVoiceSettings(ctx.db, groupId),
+          countGroupVoiceSentToday(ctx.db, groupId, now),
         ])
+        const effectiveVoice = resolveEffectiveVoiceConfig(ctx.config, groupVoice)
         const mode = resolveEffectiveMode(ctx.config, settings)
         const persona = resolvePersona(ctx.config, settings)
         const cooldown = resolveEffectiveCooldownSeconds(ctx.config, settings)
@@ -141,8 +149,14 @@ export default definePlugin<SocialConfig>({
           ? `看图 ${today.visionCalls} 次（缓存命中 ${today.visionCacheHits}）/ 发图 ${today.memeSent} 次 / 收藏 ${today.memeCollected} 次`
           : '今日暂无多模态调用'
 
+        const voiceLine = effectiveVoice.enabled
+          ? `开（${ctx.config.tts_provider} / ${effectiveVoice.triggerMode} / 今日 ${voiceToday}${effectiveVoice.dailyLimit ? `/${effectiveVoice.dailyLimit}` : ''} 条）`
+          : ctx.config.enable_voice
+            ? '未就绪（缺少 TTS API Key）'
+            : '关'
+
         return [
-          '【本群拟人聊天状态 v0.5.0】',
+          '【本群拟人聊天状态 v0.10.0】',
           `- 发言模式：${mode}`,
           `- 当前人格：${persona.name}（${persona.id}）`,
           `- @机器人让渡Agent：${ctx.config.yield_at_to_agent ? '开（防重复回复）' : '关（由本插件回复）'}`,
@@ -151,6 +165,7 @@ export default definePlugin<SocialConfig>({
           `- 短期上下文：${state?.recentMessages.length ?? 0} 条`,
           `- 本群活跃记忆：${memories.length} 条（保留 ${resolveMemoryTtlDays(ctx.config, settings)} 天）`,
           `- 可用表情包：${memes.length} 张（智能发图：${ctx.config.enable_meme_reply ? '开' : '关'}）`,
+          `- AI 语音互动：${voiceLine}`,
           `- 对话模型：${llmStatus}`,
           `- 图片理解：${visionStatus}`,
           `- 多模态统计：${todayLine}`,
@@ -366,6 +381,78 @@ export default definePlugin<SocialConfig>({
           return `${i + 1}. ${scopeTag} ${m.meaning}（${m.mood}｜${m.tags.slice(0, 3).join('、') || '无标签'}）\n   id: ${m.id}`
         })
         return ['可用表情包（最多展示 12 条）：', ...lines].join('\n')
+      },
+    },
+
+    'social say': {
+      aliases: ['说'],
+      description: '发送原生AI语音消息',
+      usage: '/social say <想说的话>',
+      scenes: ['group'],
+      async handler({ session, ctx, argText }) {
+        await ensureSchema(ctx.db, ctx.logger)
+        const text = argText.trim()
+        if (!text) return '用法：/说 <想让机器人说的话>'
+        const groupId = session.targetId
+        const now = Date.now()
+        const groupVoice = await getGroupVoiceSettings(ctx.db, groupId)
+        const effective = resolveEffectiveVoiceConfig(ctx.config, groupVoice)
+        if (!effective.enabled) {
+          return '本群未开启 AI 语音功能，或尚未配置 TTS API Key。'
+        }
+        if (text.length > ctx.config.voice_max_chars) {
+          return `单次语音最多 ${ctx.config.voice_max_chars} 字（当前 ${text.length} 字）。`
+        }
+        if (effective.dailyLimit > 0) {
+          const sentToday = await countGroupVoiceSentToday(ctx.db, groupId, now)
+          if (sentToday >= effective.dailyLimit) {
+            return `本群今日语音次数已达上限（${effective.dailyLimit} 条）。`
+          }
+        }
+        const prepared = await synthesizeAndPrepareVoice(ctx, {
+          groupId,
+          text,
+          voiceId: effective.voiceId,
+          speed: effective.speed,
+          emotion: effective.emotion,
+          now,
+        })
+        if (!prepared.ok) {
+          await recordVoiceSendLog(ctx, {
+            groupId,
+            provider: ctx.config.tts_provider,
+            model: ctx.config.tts_model,
+            voiceId: effective.voiceId,
+            emotion: effective.emotion,
+            charCount: text.length,
+            estimatedCost: 0,
+            format: ctx.config.tts_audio_format,
+            cached: false,
+            status: 'failed',
+            error: prepared.error,
+            createdAt: now,
+          })
+          return `语音合成失败：${prepared.error}`
+        }
+        const res = await session.reply({ media: prepared.media })
+        await recordVoiceSendLog(ctx, {
+          groupId,
+          provider: ctx.config.tts_provider,
+          model: ctx.config.tts_model,
+          voiceId: effective.voiceId,
+          emotion: effective.emotion,
+          charCount: text.length,
+          estimatedCost: prepared.estimatedCost,
+          format: prepared.format,
+          cached: prepared.cached,
+          status: res.ok ? 'sent' : 'failed',
+          error: res.ok ? '' : (res.error ?? `HTTP ${res.status}`),
+          createdAt: now,
+        })
+        if (!res.ok) {
+          return ctx.config.voice_fallback_to_text ? text : `语音发送失败：${res.error ?? `HTTP ${res.status}`}`
+        }
+        return undefined
       },
     },
 

@@ -122,6 +122,49 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       ) WITHOUT ROWID;`,
     ],
   },
+  {
+    version: 3,
+    name: 'v0.10.0_ai_voice',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS {group_voice_settings} (
+        group_id TEXT PRIMARY KEY,
+        enabled INTEGER,
+        trigger_mode TEXT,
+        probability REAL,
+        voice_id TEXT,
+        speed REAL,
+        emotion TEXT,
+        daily_limit INTEGER,
+        updated_at INTEGER NOT NULL
+      ) WITHOUT ROWID;`,
+      `CREATE TABLE IF NOT EXISTS {voice_cache} (
+        cache_key TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        format TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        r2_key TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      ) WITHOUT ROWID;`,
+      `CREATE TABLE IF NOT EXISTS {voice_logs} (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        voice_id TEXT NOT NULL,
+        emotion TEXT NOT NULL DEFAULT '',
+        char_count INTEGER NOT NULL,
+        estimated_cost REAL NOT NULL DEFAULT 0,
+        format TEXT NOT NULL,
+        cached INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        error TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+      ) WITHOUT ROWID;`,
+      `CREATE INDEX IF NOT EXISTS {voice_logs_grp_ts} ON {voice_logs}(group_id, created_at);`,
+    ],
+  },
 ]
 
 export const SCHEMA_STATEMENTS: readonly string[] = [
