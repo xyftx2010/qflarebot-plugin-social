@@ -1,6 +1,6 @@
 {
   "name": "qflarebot-plugin-social",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "QFlareBot 独立多模态拟人 Social Agent 插件：自然群聊、工具调用、图片理解、表情包素材库、AI 原生语音回复与群级隔离记忆",
   "license": "MIT",
   "type": "module",

@@ -1,30 +1,25 @@
 import type { PluginContext, PluginToolArtifact } from '@qqbot/sdk'
 import type {
-  AgentToolPolicy,
+  AgentChannel,
   LLMChatMessage,
   LLMService,
   LLMToolDefinition,
   SocialConfig,
   ToolExecutionLog,
 } from '../types.js'
-import {
-  executeBuiltinTool,
-  findBuiltinByWireName,
-  listEnabledBuiltinToolDefs,
-} from './builtin-tools.js'
-import {
-  discoverExternalTools,
-  invokeExternalTool,
-  type DiscoveredExternalTools,
-} from './external-tools.js'
+import { executeBuiltinTool, findBuiltinByWireName } from './builtin-tools.js'
+import { invokeExternalTool, type DiscoveredExternalTools } from './external-tools.js'
 
 export interface AgentLoopInput {
   ctx: PluginContext<SocialConfig>
   llm: LLMService
   conversationId: string
   messages: LLMChatMessage[]
-  allowTools: boolean
-  policy: AgentToolPolicy
+  channel: AgentChannel
+  toolDefs: LLMToolDefinition[]
+  externalDiscovered: DiscoveredExternalTools | null
+  maxSteps?: number
+  deadlineMs?: number
   now: number
   fetchImpl?: typeof fetch
   random?: () => number
@@ -37,6 +32,7 @@ export interface AgentLoopOutput {
   usage: {
     runs: number
     toolCalls: number
+    toolFailures: number
     inputTokens: number
     outputTokens: number
   }
@@ -62,37 +58,30 @@ function serializeToolResult(payload: unknown): string {
 }
 
 /**
- * 统一 Social Agent 执行引擎：
- * - 快通道（allowTools=false 或无可用工具）：1 次 llm.chat() 直接返回；
- * - Agent Loop（allowTools=true 且有可用工具）：支持多步 Function Calling、
- *   思考签名透传、重复调用死循环保护、步数/次数/软超时预算控制与工具附件收集。
+ * 统一 Social Agent 执行引擎（V0.11.1 三通道复用版）：
+ * - Fast Chat（toolDefs 为空）：1 次 llm.chat()，零工具 Schema 开销；
+ * - Smart Tool Chat / Full Agent：按注入的精选或全量工具集执行多步 ReAct 循环，
+ *   共享同一条消息的预算 deadline、思考签名透传与死循环拦截。
  */
 export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLoopOutput> {
-  const { ctx, llm, conversationId, allowTools, policy, now } = input
+  const { ctx, llm, conversationId, channel, toolDefs, externalDiscovered, now } = input
   const fetchImpl = input.fetchImpl ?? globalThis.fetch
   const model = ctx.config.model_alias.trim() || undefined
 
-  const usage = { runs: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0 }
+  const usage = { runs: 0, toolCalls: 0, toolFailures: 0, inputTokens: 0, outputTokens: 0 }
   const toolLogs: Array<Omit<ToolExecutionLog, 'id'>> = []
   const artifacts: PluginToolArtifact[] = []
+  const deadline = input.deadlineMs ?? Date.now() + Math.max(6_000, ctx.config.agent_budget_ms || 18_000)
 
-  let externalDiscovered: DiscoveredExternalTools | null = null
-  let toolDefs: LLMToolDefinition[] = []
-
-  if (allowTools && ctx.config.enable_agent_tools) {
-    const builtinDefs = listEnabledBuiltinToolDefs(ctx.config, policy.enabledBuiltins)
-    externalDiscovered = await discoverExternalTools(ctx, policy)
-    toolDefs = [...builtinDefs, ...(externalDiscovered?.definitions ?? [])]
-  }
-
-  // 快通道：零工具开销，单次调用
-  if (toolDefs.length === 0) {
+  // Fast Chat 快通道：零工具 Schema，单次调用
+  if (channel === 'fast' || toolDefs.length === 0) {
+    const timeoutMs = Math.max(3_000, Math.min(ctx.config.llm_timeout_ms, deadline - Date.now()))
     const res = await llm.chat({
       model,
       messages: input.messages,
       temperature: ctx.config.temperature,
       max_tokens: ctx.config.max_output_tokens,
-      timeout_ms: ctx.config.llm_timeout_ms,
+      timeout_ms: timeoutMs,
     })
     usage.runs += 1
     usage.inputTokens += res.usage?.input_tokens ?? 0
@@ -106,11 +95,14 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
     }
   }
 
-  // Agent Loop：带工具调用的多轮推理
+  // Smart Tool Chat / Full Agent：受限多步 Function Calling 循环
   const history: LLMChatMessage[] = [...input.messages]
-  const maxSteps = Math.min(6, Math.max(1, Math.floor(ctx.config.agent_max_tool_steps || 4)))
+  const allowedWireNames = new Set(toolDefs.map((t) => t.name))
+  const maxSteps = Math.min(
+    6,
+    Math.max(1, Math.floor(input.maxSteps ?? ctx.config.agent_max_tool_steps ?? 4)),
+  )
   const maxCalls = Math.min(12, Math.max(1, Math.floor(ctx.config.agent_max_tool_calls || 6)))
-  const deadline = Date.now() + Math.max(6_000, ctx.config.agent_budget_ms || 18_000)
   const seenCallFingerprints = new Set<string>()
   let totalCalls = 0
 
@@ -142,7 +134,6 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
       }
     }
 
-    // 保留思考签名（Gemini thought_signatures / Anthropic reasoning_signatures / DeepSeek reasoning）
     history.push({
       role: 'assistant',
       content: res.text || undefined,
@@ -159,9 +150,29 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
           role: 'tool',
           tool_call_id: call.id,
           is_error: true,
-          content: JSON.stringify({ error: '工具调用已达本轮次数或时间预算上限，请直接根据已有信息回复。' }),
+          content: JSON.stringify({ error: '工具调用已达本轮次数或时间预算上限，请直接根据已有信息自然回复。' }),
         })
         loopBroken = true
+        continue
+      }
+
+      if (!allowedWireNames.has(call.name)) {
+        usage.toolFailures += 1
+        toolLogs.push({
+          groupId: conversationId,
+          toolId: call.name,
+          source: 'external',
+          status: 'denied',
+          latencyMs: 0,
+          error: '工具未在当前会话授权列表中',
+          createdAt: now,
+        })
+        history.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          is_error: true,
+          content: JSON.stringify({ error: `工具 ${call.name} 未授权，请勿调用。` }),
+        })
         continue
       }
 
@@ -193,6 +204,7 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
           fetchImpl,
           random: input.random,
         })
+        if (!result.ok) usage.toolFailures += 1
         toolLogs.push({
           groupId: conversationId,
           toolId: builtin.id,
@@ -217,6 +229,7 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
           timeoutMs: ctx.config.tool_timeout_ms,
           deadline,
         })
+        if (!result.ok) usage.toolFailures += 1
         toolLogs.push({
           groupId: conversationId,
           toolId: extBound.descriptor.id,
@@ -238,6 +251,7 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
         continue
       }
 
+      usage.toolFailures += 1
       toolLogs.push({
         groupId: conversationId,
         toolId: call.name,
@@ -258,7 +272,7 @@ export async function runSocialAgentLoop(input: AgentLoopInput): Promise<AgentLo
     if (loopBroken) break
   }
 
-  // 步数/时间预算耗尽后做一次不带 tools 的收尾总结，确保给用户自然答复
+  // 步数/时间预算耗尽后做一次不带 tools 的收尾总结
   const finalTimeout = Math.max(4_000, Math.min(ctx.config.llm_timeout_ms, deadline - Date.now() + 4_000))
   const finalRes = await llm.chat({
     model,

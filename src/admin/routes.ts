@@ -27,6 +27,7 @@ import {
   listToolStats,
   saveAgentToolPolicy,
   setPromptFragmentEnabled,
+  summarizeRoutingObservability,
 } from '../store/agent-db.js'
 import { BUILTIN_TOOLS } from '../agent/builtin-tools.js'
 import { tryGetCoreTools } from '../agent/external-tools.js'
@@ -477,12 +478,13 @@ export function createAdminRoutes(): Route<SocialConfig>[] {
       auth: 'admin',
       handler: async ({ ctx }) => {
         await ensureSchema(ctx.db, ctx.logger)
-        const [policy, llmUsage7d, toolStats7d, toolLogs, promptFragments] = await Promise.all([
+        const [policy, llmUsage7d, toolStats7d, toolLogs, promptFragments, routing7d] = await Promise.all([
           getAgentToolPolicy(ctx.db),
           listLLMUsageStats(ctx.db, 7),
           listToolStats(ctx.db, 7),
           listRecentToolLogs(ctx.db, 40),
           listPromptFragments(ctx.db, false),
+          summarizeRoutingObservability(ctx.db, 7),
         ])
 
         const registry = tryGetCoreTools(ctx)
@@ -519,6 +521,13 @@ export function createAdminRoutes(): Route<SocialConfig>[] {
             webSearchProvider: ctx.config.web_search_provider,
             hasWebSearchKey: Boolean(ctx.config.web_search_api_key.trim()),
             coreToolsAvailable: Boolean(registry),
+            adaptiveEnabled: ctx.config.adaptive_agent_enabled,
+            routingMode: ctx.config.agent_routing_mode,
+            allowNonMention: ctx.config.agent_allow_non_mention,
+            autoEscalate: ctx.config.agent_auto_escalate,
+            candidateTopK: ctx.config.agent_candidate_top_k,
+            autoMaxSteps: ctx.config.agent_auto_max_steps,
+            autoDailyLimit: ctx.config.agent_auto_daily_limit,
           },
           policy,
           builtinTools: BUILTIN_TOOLS.map((t) => ({
@@ -532,6 +541,7 @@ export function createAdminRoutes(): Route<SocialConfig>[] {
           toolStats7d,
           toolLogs,
           promptFragments,
+          routing7d,
         })
       },
     },

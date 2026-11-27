@@ -102,13 +102,13 @@ describe('V0.11.0 Social Agent Engine: fast chat, ReAct loop, core.tools, dedup 
     await ensureSchema(ctx.db)
     await saveAgentToolPolicy(ctx.db, { enabledExternalTools: ['t2i.render'] })
 
-    // 1. 非 @ 普通插话 -> 快通道（不传 tools）
+    // 1. 非 @ 普通闲聊插话 -> 快通道（不传 tools）
     const nonAt = createMockSession({
       scene: 'group',
       event: 'qq.group.message',
       targetId: 'grp-agent',
       messageId: 'msg-non-at-1',
-      content: '小Q今晚吃啥呀？',
+      content: '小Q今天心情真不错呀',
       atMe: false,
     })
     const oFast = await handleGroupChatEvent(nonAt, ctx, { now: () => 1_000_000, random: () => 0.1, awaitBackground: true })

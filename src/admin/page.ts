@@ -94,7 +94,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
     <div class="card">
       <div class="row between">
         <div>
-          <h1>拟人群聊（qflarebot-plugin-social v0.11.0 · 独立 Social Agent）</h1>
+          <h1>拟人群聊（qflarebot-plugin-social v0.11.1 · 自适应 Social Agent）</h1>
           <div id="summary" class="muted">正在加载运行状态...</div>
           <div id="mm-summary" class="muted" style="margin-top:4px"></div>
         </div>
@@ -148,6 +148,21 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       </div>
       <div id="agent-summary" class="muted" style="margin-bottom:10px">正在加载 Agent 状态...</div>
       <div class="grid" id="llm-usage-grid" style="margin-bottom:12px"></div>
+      <div class="muted" style="margin-bottom:6px">近 7 天三通道路由性能与误触发统计（Fast / Smart / Full）：</div>
+      <table style="margin-bottom:12px">
+        <thead>
+          <tr>
+            <th>通道</th>
+            <th>调用次数</th>
+            <th>平均延迟</th>
+            <th>P95 延迟</th>
+            <th>Token 消耗</th>
+            <th>工具调用/失败</th>
+            <th>误触发</th>
+          </tr>
+        </thead>
+        <tbody id="routing-stats-body"></tbody>
+      </table>
       <div class="muted" style="margin-bottom:6px">内置娱乐/查询工具：</div>
       <div id="builtin-tools-box" class="row" style="margin-bottom:12px"></div>
       <div class="muted" style="margin-bottom:6px">外部插件工具白名单（框架 core.tools 自动发现，默认关闭）：</div>
@@ -567,12 +582,34 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       if (!data.ok) return
       const c = data.config
       document.getElementById('agent-summary').textContent =
-        'Agent 工具：' + (c.enableAgentTools ? '开' : '关') +
-        ' · 步数/次数：' + c.maxToolSteps + '步 / ' + c.maxToolCalls + '次' +
+        '路由模式：' + (c.adaptiveEnabled ? c.routingMode : '已关闭自适应') +
+        ' · 非@工具：' + (c.allowNonMention ? '开' : '关') +
+        ' · 自主升级：' + (c.autoEscalate ? '开' : '关') +
+        ' · Top-K：' + c.candidateTopK +
         ' · 预算：' + c.agentBudgetMs + 'ms' +
-        ' · 上下文压缩：' + c.contextMaxTokens + ' tokens' +
-        ' · 联网搜索：' + (c.hasWebSearchKey ? c.webSearchProvider : '未配置Key') +
         ' · core.tools：' + (c.coreToolsAvailable ? '已接入' : '未提供')
+
+      const rBody = document.getElementById('routing-stats-body')
+      rBody.textContent = ''
+      const routing = data.routing7d || { channels: [], totalEscalations: 0, totalFalseTriggers: 0 }
+      for (const ch of routing.channels || []) {
+        const tr = document.createElement('tr')
+        const cells = [
+          ch.channel,
+          String(ch.count),
+          ch.avgLatencyMs + 'ms',
+          ch.p95LatencyMs + 'ms',
+          String(ch.totalTokens),
+          ch.totalToolCalls + ' / ' + ch.totalToolFailures,
+          String(ch.falseTriggers),
+        ]
+        for (const val of cells) {
+          const td = document.createElement('td')
+          td.textContent = val
+          tr.appendChild(td)
+        }
+        rBody.appendChild(tr)
+      }
 
       const usageTotals = (data.llmUsage7d || []).reduce(
         (acc, r) => ({

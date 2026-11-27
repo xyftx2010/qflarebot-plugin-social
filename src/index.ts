@@ -210,10 +210,10 @@ export default definePlugin<SocialConfig>({
           : '今日暂无调用'
 
         return [
-          '【本群拟人聊天状态 v0.11.0 · 独立 Social Agent】',
+          '【本群拟人聊天状态 v0.11.1 · 自适应 Social Agent】',
           `- 发言模式：${mode}`,
           `- 当前人格：${persona.name}（${persona.id}）`,
-          `- Agent 工具：${ctx.config.enable_agent_tools ? `开（内置 ${toolPolicy.enabledBuiltins.length} / 外部白名单 ${toolPolicy.enabledExternalTools.length}）` : '关'}`,
+          `- 自适应路由：${ctx.config.enable_agent_tools && ctx.config.adaptive_agent_enabled ? `${ctx.config.agent_routing_mode}（非@工具:${ctx.config.agent_allow_non_mention ? '开' : '关'} / 自主升级:${ctx.config.agent_auto_escalate ? '开' : '关'} / Top-${ctx.config.agent_candidate_top_k}）` : '关'}`,
           `- 冷却时间：${cooldown} 秒（每分钟上限 ${ctx.config.max_replies_per_minute} 条）`,
           `- 非@全量消息权限：${nonAtDiag}`,
           `- 短期上下文：${state?.recentMessages.length ?? 0} 条（预算 ${ctx.config.context_max_tokens} tokens）`,

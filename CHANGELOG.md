@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.11.1] - 2026-11-27
+
+### Added
+- **自适应三通道路由（Fast Chat / Smart Tool Chat / Full Agent）**：
+  - 新增 `src/agent/intent-router.ts`、`src/agent/tool-selector.ts`、`src/agent/escalation.ts`，普通非 `@` 群聊通过零 LLM 成本意图与上下文指代识别自动判断是否加载候选工具，群友无需 `/ask` 或 `@` 即可自然触发天气、时间、联网搜索、群记忆、抽签等工具。
+  - 保留 Fast Chat 零工具低延迟优势：纯闲聊与无查询意图的关键词感叹句不加载工具 Schema；同时支持模型自主升级（`[[escalate:...]]` / `[[silence]]`），单跳升级共享同一预算、去重与权限白名单，不重复回复。
+  - Smart Tool Chat 动态精选最相关的 1～3 个工具（`agent_candidate_top_k`），Full Agent 处理显式 `/ask` 与多工具复杂查询；严格先过原有发言概率、冷却与每日自动上限守卫。
+- **拟人化输出与可观测性（Migration v5）**：
+  - 新增 `{routing_logs}` 表，统计 Fast / Smart / Full 三通道调用次数、平均与 P95 延迟、Token 消耗、模型自主升级次数、工具调用/失败数与误触发次数，全部接入 `/p/social/ui/` 管理后台。
+  - 新增 `adaptive_agent_enabled`、`agent_routing_mode`、`agent_allow_non_mention`、`agent_context_intent`、`agent_auto_escalate`、`agent_candidate_top_k`、`agent_auto_max_steps`、`agent_show_tool_progress`、`agent_auto_daily_limit` 配置项。
+
 ## [0.11.0] - 2026-11-27
 
 ### Added

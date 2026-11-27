@@ -266,6 +266,26 @@ export interface SocialConfig {
   web_search_provider: 'tavily' | 'bocha'
   /** 可选联网搜索 API Key（留空则不启用联网搜索工具） */
   web_search_api_key: string
+
+  // ---- V0.11.1 自适应三通道路由与无感工具调用 ----
+  /** 是否开启自适应三通道路由（Fast / Smart Tool / Full Agent） */
+  adaptive_agent_enabled: boolean
+  /** 路由模式：adaptive 自适应 / explicit_only 仅显式 @或/ask / always_smart 始终智能筛选 */
+  agent_routing_mode: AgentRoutingMode
+  /** 是否允许普通非 @ 群消息自然触发工具调用 */
+  agent_allow_non_mention: boolean
+  /** 是否结合近期群聊上下文做指代消解与话题意图识别 */
+  agent_context_intent: boolean
+  /** 是否允许 Fast Chat 模型自主申请升级到 Agent 工具通道 */
+  agent_auto_escalate: boolean
+  /** Smart Tool Chat 最多加载的候选工具数量（1 ~ 5，默认 3） */
+  agent_candidate_top_k: number
+  /** 普通非 @ 自动工具调用的最大步数（1 ~ 4，默认 2） */
+  agent_auto_max_steps: number
+  /** 是否在调试时显示工具调用提示（默认关闭，保持拟人隐身） */
+  agent_show_tool_progress: boolean
+  /** 每群每日非 @ 自动工具路由次数上限（0 = 不限） */
+  agent_auto_daily_limit: number
 }
 
 export interface PersonaDefinition {
@@ -540,6 +560,9 @@ export interface ToolExecutionLog {
   createdAt: number
 }
 
+export type AgentRoutingMode = 'adaptive' | 'explicit_only' | 'always_smart'
+export type AgentChannel = 'fast' | 'smart' | 'full'
+
 export interface LLMDailyUsage {
   day: string
   runs: number
@@ -547,4 +570,31 @@ export interface LLMDailyUsage {
   inputTokens: number
   outputTokens: number
   updatedAt: number
+}
+
+export interface RoutingLogRecord {
+  id: string
+  day: string
+  groupId: string
+  channel: AgentChannel
+  escalated: boolean
+  matchedIntents: string[]
+  candidateCount: number
+  toolCalls: number
+  toolFailures: number
+  falseTrigger: boolean
+  latencyMs: number
+  tokens: number
+  createdAt: number
+}
+
+export interface ChannelObservabilitySummary {
+  channel: AgentChannel
+  count: number
+  avgLatencyMs: number
+  p95LatencyMs: number
+  totalTokens: number
+  totalToolCalls: number
+  totalToolFailures: number
+  falseTriggers: number
 }

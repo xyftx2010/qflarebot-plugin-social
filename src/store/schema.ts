@@ -213,6 +213,28 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       ) WITHOUT ROWID;`,
     ],
   },
+  {
+    version: 5,
+    name: 'v0.11.1_adaptive_routing',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS {routing_logs} (
+        id TEXT PRIMARY KEY,
+        day TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        escalated INTEGER NOT NULL DEFAULT 0,
+        matched_intents TEXT NOT NULL DEFAULT '',
+        candidate_count INTEGER NOT NULL DEFAULT 0,
+        tool_calls INTEGER NOT NULL DEFAULT 0,
+        tool_failures INTEGER NOT NULL DEFAULT 0,
+        false_trigger INTEGER NOT NULL DEFAULT 0,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        tokens INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      ) WITHOUT ROWID;`,
+      `CREATE INDEX IF NOT EXISTS {routing_logs_day} ON {routing_logs}(day, group_id);`,
+    ],
+  },
 ]
 
 export const SCHEMA_STATEMENTS: readonly string[] = [

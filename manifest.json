@@ -1,6 +1,6 @@
 {
   "name": "social",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "apiVersion": 5,
   "permissions": [
     "db",
@@ -892,6 +892,104 @@
           "enable_agent_tools": true
         }
       },
+      "adaptive_agent_enabled": {
+        "type": "boolean",
+        "title": "启用自适应三通道路由",
+        "description": "根据自然语言意图自动在 Fast Chat / Smart Tool Chat / Full Agent 间切换，群友无需 /ask 即可触发工具。",
+        "default": true,
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
+      "agent_routing_mode": {
+        "title": "Agent 路由策略",
+        "oneOf": [
+          {
+            "const": "adaptive",
+            "title": "自适应三通道（推荐）"
+          },
+          {
+            "const": "explicit_only",
+            "title": "仅显式触发（仅 @机器人 / /ask）"
+          },
+          {
+            "const": "always_smart",
+            "title": "始终 Smart Tool 筛选"
+          }
+        ],
+        "default": "adaptive",
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
+      "agent_allow_non_mention": {
+        "type": "boolean",
+        "title": "允许非 @ 群消息自然调用工具",
+        "description": "在通过原有发言概率和冷却判断后，允许普通群聊自然触发天气/时间/搜索等工具。",
+        "default": true,
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
+      "agent_context_intent": {
+        "type": "boolean",
+        "title": "启用上下文指代意图识别",
+        "description": "结合最近几条群聊消息理解模糊追问（如“那上海呢？”）。",
+        "default": true,
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
+      "agent_auto_escalate": {
+        "type": "boolean",
+        "title": "允许快通道自主升级 Agent",
+        "description": "当普通闲聊模型发现需要实时数据或工具才能回答时，自动无缝升级到工具通道。",
+        "default": true,
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
+      "agent_candidate_top_k": {
+        "type": "integer",
+        "title": "Smart 通道最多加载工具数",
+        "description": "按意图相关性动态筛选 1 ~ 5 个候选工具（默认 3），兼顾准确与低延迟。",
+        "minimum": 1,
+        "maximum": 5,
+        "default": 3,
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
+      "agent_auto_max_steps": {
+        "type": "integer",
+        "title": "非 @ 自动工具最大步数",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 2,
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
+      "agent_show_tool_progress": {
+        "type": "boolean",
+        "title": "显示工具调用过程（调试用）",
+        "description": "默认关闭以保持拟人自然体验；开启后仅在回复末尾附简短工具标注。",
+        "default": false,
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
+      "agent_auto_daily_limit": {
+        "type": "integer",
+        "title": "每群每日非 @ 自动工具上限",
+        "description": "限制每群每天自然触发 Smart/Full 工具通道的次数（0 = 不限）。",
+        "minimum": 0,
+        "maximum": 500,
+        "default": 40,
+        "x-showIf": {
+          "enable_agent_tools": true
+        }
+      },
       "custom_personas": {
         "type": "array",
         "title": "自定义人格",
@@ -1000,7 +1098,16 @@
     "context_max_tokens": 3000,
     "enable_c2c_chat": false,
     "web_search_provider": "tavily",
-    "web_search_api_key": ""
+    "web_search_api_key": "",
+    "adaptive_agent_enabled": true,
+    "agent_routing_mode": "adaptive",
+    "agent_allow_non_mention": true,
+    "agent_context_intent": true,
+    "agent_auto_escalate": true,
+    "agent_candidate_top_k": 3,
+    "agent_auto_max_steps": 2,
+    "agent_show_tool_progress": false,
+    "agent_auto_daily_limit": 40
   },
   "ui": {
     "path": "/ui/",

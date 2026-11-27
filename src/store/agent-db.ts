@@ -1,8 +1,11 @@
 import type { ScopedDB } from '@qqbot/sdk'
 import type {
+  AgentChannel,
   AgentToolPolicy,
+  ChannelObservabilitySummary,
   LLMDailyUsage,
   PromptFragmentRecord,
+  RoutingLogRecord,
   ToolDailyStat,
   ToolExecutionLog,
 } from '../types.js'
@@ -329,4 +332,147 @@ export async function listLLMUsageStats(db: ScopedDB, days = 7): Promise<LLMDail
     outputTokens: r.output_tokens,
     updatedAt: r.updated_at,
   }))
+}
+
+// ---------------------------------------------------------------------------
+// V0.11.1 自适应三通道路由可观测性日志与统计
+// ---------------------------------------------------------------------------
+
+export async function insertRoutingLog(
+  db: ScopedDB,
+  entry: Omit<RoutingLogRecord, 'id' | 'day'>,
+): Promise<void> {
+  const id = `rlog_${entry.createdAt.toString(36)}_${Math.random().toString(36).slice(2, 7)}`
+  const day = formatDayKey(entry.createdAt)
+  await db.run(
+    `INSERT INTO {routing_logs} (
+       id, day, group_id, channel, escalated, matched_intents, candidate_count,
+       tool_calls, tool_failures, false_trigger, latency_ms, tokens, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    id,
+    day,
+    entry.groupId,
+    entry.channel,
+    entry.escalated ? 1 : 0,
+    entry.matchedIntents.join(','),
+    entry.candidateCount,
+    entry.toolCalls,
+    entry.toolFailures,
+    entry.falseTrigger ? 1 : 0,
+    Math.max(0, Math.round(entry.latencyMs)),
+    Math.max(0, Math.round(entry.tokens)),
+    entry.createdAt,
+  )
+}
+
+export async function countGroupAutoAgentToday(
+  db: ScopedDB,
+  groupId: string,
+  now = Date.now(),
+): Promise<number> {
+  const day = formatDayKey(now)
+  const row = await db.first<{ cnt: number }>(
+    `SELECT COUNT(*) AS cnt FROM {routing_logs}
+     WHERE day = ? AND group_id = ? AND channel IN ('smart', 'full')`,
+    day,
+    groupId,
+  )
+  return Number(row?.cnt ?? 0)
+}
+
+export async function summarizeRoutingObservability(
+  db: ScopedDB,
+  days = 7,
+  now = Date.now(),
+): Promise<{
+  channels: ChannelObservabilitySummary[]
+  totalEscalations: number
+  totalFalseTriggers: number
+  recentLogs: RoutingLogRecord[]
+}> {
+  const since = formatDayKey(now - Math.max(1, days - 1) * 24 * 3600 * 1000)
+  const rows = await db.all<{
+    id: string
+    day: string
+    group_id: string
+    channel: string
+    escalated: number
+    matched_intents: string
+    candidate_count: number
+    tool_calls: number
+    tool_failures: number
+    false_trigger: number
+    latency_ms: number
+    tokens: number
+    created_at: number
+  }>('SELECT * FROM {routing_logs} WHERE day >= ? ORDER BY created_at DESC LIMIT 500', since)
+
+  const buckets: Record<AgentChannel, typeof rows> = { fast: [], smart: [], full: [] }
+  let totalEscalations = 0
+  let totalFalseTriggers = 0
+
+  for (const r of rows) {
+    const ch: AgentChannel = r.channel === 'full' ? 'full' : r.channel === 'smart' ? 'smart' : 'fast'
+    buckets[ch].push(r)
+    if (r.escalated === 1) totalEscalations += 1
+    if (r.false_trigger === 1) totalFalseTriggers += 1
+  }
+
+  const calcSummary = (channel: AgentChannel): ChannelObservabilitySummary => {
+    const list = buckets[channel]
+    if (list.length === 0) {
+      return {
+        channel,
+        count: 0,
+        avgLatencyMs: 0,
+        p95LatencyMs: 0,
+        totalTokens: 0,
+        totalToolCalls: 0,
+        totalToolFailures: 0,
+        falseTriggers: 0,
+      }
+    }
+    const latencies = list.map((x) => x.latency_ms).sort((a, b) => a - b)
+    const sumLat = latencies.reduce((a, b) => a + b, 0)
+    const p95Idx = Math.min(latencies.length - 1, Math.floor(latencies.length * 0.95))
+    return {
+      channel,
+      count: list.length,
+      avgLatencyMs: Math.round(sumLat / list.length),
+      p95LatencyMs: latencies[p95Idx] ?? 0,
+      totalTokens: list.reduce((a, x) => a + x.tokens, 0),
+      totalToolCalls: list.reduce((a, x) => a + x.tool_calls, 0),
+      totalToolFailures: list.reduce((a, x) => a + x.tool_failures, 0),
+      falseTriggers: list.filter((x) => x.false_trigger === 1).length,
+    }
+  }
+
+  const recentLogs: RoutingLogRecord[] = rows.slice(0, 25).map((r) => ({
+    id: r.id,
+    day: r.day,
+    groupId: r.group_id,
+    channel: r.channel === 'full' ? 'full' : r.channel === 'smart' ? 'smart' : 'fast',
+    escalated: r.escalated === 1,
+    matchedIntents: r.matched_intents ? r.matched_intents.split(',').filter(Boolean) : [],
+    candidateCount: r.candidate_count,
+    toolCalls: r.tool_calls,
+    toolFailures: r.tool_failures,
+    falseTrigger: r.false_trigger === 1,
+    latencyMs: r.latency_ms,
+    tokens: r.tokens,
+    createdAt: r.created_at,
+  }))
+
+  return {
+    channels: [calcSummary('fast'), calcSummary('smart'), calcSummary('full')],
+    totalEscalations,
+    totalFalseTriggers,
+    recentLogs,
+  }
+}
+
+export async function pruneOldRoutingLogs(db: ScopedDB, retentionDays = 7, now = Date.now()): Promise<number> {
+  const cutoff = now - Math.max(1, retentionDays) * 24 * 3600 * 1000
+  const res = await db.run('DELETE FROM {routing_logs} WHERE created_at < ?', cutoff)
+  return res.changes
 }

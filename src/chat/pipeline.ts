@@ -1,5 +1,6 @@
 import type { OutgoingMessage, PluginContext, PluginToolArtifact, Session } from '@qqbot/sdk'
 import type {
+  AgentChannel,
   GroupMemory,
   GroupMultimodalState,
   GroupSettings,
@@ -7,6 +8,7 @@ import type {
   LLMChatMessage,
   LLMService,
   ReplyStyle,
+  RoutingLogRecord,
   SocialConfig,
   ToolExecutionLog,
   VoiceLogRecord,
@@ -30,9 +32,12 @@ import {
   pruneOldVoiceLogs,
 } from '../store/voice-db.js'
 import {
+  countGroupAutoAgentToday,
   getAgentToolPolicy,
+  insertRoutingLog,
   insertToolExecutionLog,
   listPromptFragments,
+  pruneOldRoutingLogs,
   pruneOldToolLogs,
   recordLLMUsage,
   recordToolStat,
@@ -67,6 +72,10 @@ import {
   resolveEffectiveVoiceConfig,
 } from '../voice/decision.js'
 import { recordVoiceSendLog, synthesizeAndPrepareVoice } from '../voice/service.js'
+import { discoverExternalTools } from '../agent/external-tools.js'
+import { analyzeMessageIntent } from '../agent/intent-router.js'
+import { buildAvailableToolCatalog, selectDynamicTools } from '../agent/tool-selector.js'
+import { buildEscalationPromptHint, parseEscalationDirective } from '../agent/escalation.js'
 import { runSocialAgentLoop } from '../agent/loop.js'
 
 /** 进程内轻量事件去重表，防止并发重试或重复投递导致重复回复 */
@@ -93,7 +102,7 @@ export interface PipelineOptions {
   now?: () => number
   random?: () => number
   fetchImpl?: typeof fetch
-  /** 显式命令（如 /ask）强制触发并允许进入 Agent Tool Loop */
+  /** 显式命令（如 /ask）强制触发并进入 Full Agent */
   forceReply?: boolean
   /** 显式文本覆盖（例如 /ask 去掉命令前缀后的正文） */
   overrideText?: string
@@ -113,6 +122,9 @@ export interface PipelineOutcome {
   voiceCached?: boolean
   usedAgentLoop?: boolean
   toolCallsCount?: number
+  channel?: AgentChannel
+  escalated?: boolean
+  candidateToolCount?: number
 }
 
 function resolveConversationId(session: Session): string {
@@ -167,9 +179,10 @@ async function runPostPersist(
     voiceLog?: Omit<VoiceLogRecord, 'id'>
     llmUsage?: { runs: number; toolCalls: number; inputTokens: number; outputTokens: number }
     toolLogs?: Array<Omit<ToolExecutionLog, 'id'>>
+    routingLog?: Omit<RoutingLogRecord, 'id' | 'day'>
   },
 ): Promise<void> {
-  const { now, shouldExtractMemory, statsDelta, usedMemeId, voiceLog, llmUsage, toolLogs } = opts
+  const { now, shouldExtractMemory, statsDelta, usedMemeId, voiceLog, llmUsage, toolLogs, routingLog } = opts
   let dirty = opts.stateDirty
 
   try {
@@ -196,6 +209,7 @@ async function runPostPersist(
         await pruneExpiredVoiceCache(ctx.db, ctx.r2, now).catch(() => 0)
         await pruneOldVoiceLogs(ctx.db, 14, now).catch(() => 0)
         await pruneOldToolLogs(ctx.db, 7, now).catch(() => 0)
+        await pruneOldRoutingLogs(ctx.db, 7, now).catch(() => 0)
       }
     }
 
@@ -228,6 +242,10 @@ async function runPostPersist(
       }
     }
 
+    if (routingLog) {
+      await insertRoutingLog(ctx.db, routingLog).catch(() => undefined)
+    }
+
     await recordMultimodalStats(ctx.db, statsDelta, now)
   } catch (err) {
     ctx.logger.warn('后台保存群聊状态或记忆失败', {
@@ -247,9 +265,9 @@ function scheduleBackground(
 }
 
 /**
- * 统一 Social Agent 执行引擎（V0.11.0）：
- * 去重 -> 1 次合批 D1 读取 -> 发言判断 -> 按需看图 -> 快通道 / ReAct 工具循环
- * -> 文字 / 表情包 / 工具图片 / 原生语音互斥发送 -> 异步后台落库与统计。
+ * 统一 Social Agent 执行引擎（V0.11.1 自适应三通道路由版）：
+ * 去重 -> 发言权限/冷却/概率守卫 -> 意图路由（Fast / Smart Tool / Full Agent）
+ * -> 动态工具筛选 + 单跳模型自主升级 -> 文字/表情包/图片/语音互斥回复 -> 可观测性落库。
  */
 export async function handleGroupChatEvent(
   session: Session,
@@ -266,7 +284,9 @@ export async function handleGroupChatEvent(
     return { replied: false, reason: 'duplicate-event', score: 0, replyStyle: 'none' }
   }
 
+  const startedAt = Date.now()
   const now = (opts.now ?? Date.now)()
+  const sharedDeadline = startedAt + Math.max(6_000, ctx.config.agent_budget_ms || 18_000)
   await ensureSchema(ctx.db, ctx.logger)
 
   const conversationId = resolveConversationId(session)
@@ -291,17 +311,19 @@ export async function handleGroupChatEvent(
   const persona = resolvePersona(ctx.config, settings)
   const callNames = collectCallNames(ctx.config, persona, session.botName)
 
-  const decision = opts.forceReply || isAllowedC2c
-    ? { shouldReply: true, reason: 'at-me' as const, score: 100, recordContext: true }
-    : evaluateTrigger({
-        session,
-        config: ctx.config,
-        settings,
-        state,
-        callNames,
-        now,
-        random: opts.random,
-      })
+  // 严格先过原有发言权限、群配置、冷却、频控与启发式发言判断，再做工具路由
+  const decision =
+    opts.forceReply || isAllowedC2c
+      ? { shouldReply: true, reason: 'at-me' as const, score: 100, recordContext: true }
+      : evaluateTrigger({
+          session,
+          config: ctx.config,
+          settings,
+          state,
+          callNames,
+          now,
+          random: opts.random,
+        })
 
   const userMsg = decision.recordContext ? buildUserContextMessage(session, now) : null
   if (userMsg) {
@@ -342,21 +364,35 @@ export async function handleGroupChatEvent(
     return { replied: false, reason: 'llm-unavailable', score: decision.score, replyStyle: 'none' }
   }
 
-  // 快慢通道判定：普通非 @ 插话走快通道（不带工具 Schema）；@机器人 / /ask / 单聊按需启用 Agent 工具循环
-  const allowTools = Boolean(ctx.config.enable_agent_tools && (opts.forceReply || session.atMe || isAllowedC2c))
   const hasImages = extractSessionImages(session, ctx.config.max_vision_images).length > 0
+  const needAutoQuota =
+    ctx.config.enable_agent_tools &&
+    !opts.forceReply &&
+    !session.atMe &&
+    ctx.config.agent_auto_daily_limit > 0
 
-  const [loadedMmState, groupVoiceSettings, toolPolicy, promptFragments] = await Promise.all([
+  const [loadedMmState, groupVoiceSettings, toolPolicy, promptFragments, autoAgentToday] = await Promise.all([
     hasImages || ctx.config.enable_meme_reply ? getGroupMultimodalState(ctx.db, conversationId) : Promise.resolve(null),
     ctx.config.tts_api_key.trim() ? getGroupVoiceSettings(ctx.db, conversationId) : Promise.resolve(null),
-    allowTools ? getAgentToolPolicy(ctx.db) : Promise.resolve({ enabledBuiltins: [], enabledExternalTools: [], allowExternalWrites: false, updatedAt: 0 }),
+    ctx.config.enable_agent_tools
+      ? getAgentToolPolicy(ctx.db)
+      : Promise.resolve({ enabledBuiltins: [], enabledExternalTools: [], allowExternalWrites: false, updatedAt: 0 }),
     listPromptFragments(ctx.db, true),
+    needAutoQuota ? countGroupAutoAgentToday(ctx.db, conversationId, now) : Promise.resolve(0),
   ])
 
   if (hasImages || ctx.config.enable_meme_reply) {
     mmState = loadedMmState ?? createEmptyMultimodalState(conversationId, now)
   }
   const effectiveVoice = resolveEffectiveVoiceConfig(ctx.config, groupVoiceSettings)
+
+  // 发现已授权的外部 core.tools 工具（仅当启用工具且有白名单）
+  const externalDiscovered = ctx.config.enable_agent_tools
+    ? await discoverExternalTools(ctx, toolPolicy)
+    : null
+  const availableCatalog = ctx.config.enable_agent_tools
+    ? buildAvailableToolCatalog(ctx.config, toolPolicy.enabledBuiltins, externalDiscovered?.tools ?? [])
+    : []
 
   // 按需图片理解
   let visionSummary = ''
@@ -385,12 +421,42 @@ export async function handleGroupChatEvent(
   }
 
   const freshContext = pruneContextWindow(state.recentMessages, ctx.config, now)
+  const priorContext = userMsg ? freshContext.slice(0, -1) : freshContext
   const userText = (opts.overrideText ?? extractReadableText(session)).trim()
   const relevantMemories = selectRelevantMemories(snapshot.memories, `${userText} ${visionTagsText}`, 10)
   const voicePromptHint = buildVoicePromptDirective(effectiveVoice)
 
-  // 稳定拼接 system prompt（人格 -> 记忆 -> 语音指令 -> 外部插件提示词片段，保护前缀缓存）
-  const systemParts = [
+  // 自适应三通道意图路由（零额外 LLM 请求）
+  const intent = analyzeMessageIntent({
+    text: userText,
+    quoteText: session.quote?.content,
+    recentMessages: priorContext,
+    config: ctx.config,
+    isExplicit: Boolean(opts.forceReply || isAllowedC2c),
+    isAtMe: session.atMe,
+    autoAgentCountToday: autoAgentToday,
+    externalTools: externalDiscovered?.tools ?? [],
+    now,
+  })
+
+  let activeChannel: AgentChannel = intent.channel
+  const dynamicSelection = selectDynamicTools({
+    channel: activeChannel,
+    catalog: availableCatalog,
+    intent,
+    text: userText,
+    topK: ctx.config.agent_candidate_top_k,
+  })
+
+  const canEscalate =
+    activeChannel === 'fast' &&
+    ctx.config.enable_agent_tools &&
+    ctx.config.adaptive_agent_enabled &&
+    ctx.config.agent_auto_escalate &&
+    availableCatalog.length > 0 &&
+    (session.atMe || (ctx.config.agent_allow_non_mention && (ctx.config.agent_auto_daily_limit === 0 || autoAgentToday < ctx.config.agent_auto_daily_limit)))
+
+  const baseSystemParts = [
     buildSocialSystemPrompt(persona, relevantMemories, session.botName),
     voicePromptHint,
     ...promptFragments.map((f) => f.fragment),
@@ -409,32 +475,130 @@ export async function handleGroupChatEvent(
   if (visionNotes.length > 0 && !visionSummary) {
     promptSections.push('', `图片读取备注：${visionNotes.join('；')}（如果看不到图就自然接文字话题，不要硬编图片内容）`)
   }
-  promptSections.push(
-    '',
-    `请结合语境自然回应最新一条来自「${currentSpeaker}」的消息，只输出回复正文。`,
-  )
+  promptSections.push('', `请结合语境自然回应最新一条来自「${currentSpeaker}」的消息，只输出回复正文。`)
+  const userPromptContent = promptSections.join('\n')
 
-  const messages: LLMChatMessage[] = [
-    { role: 'system', content: systemParts.join('\n\n') },
-    { role: 'user', content: promptSections.join('\n') },
-  ]
+  const buildMessages = (withEscalationHint: boolean): LLMChatMessage[] => {
+    const sys = withEscalationHint
+      ? [...baseSystemParts, buildEscalationPromptHint(true, availableCatalog.map((c) => c.id))]
+      : baseSystemParts
+    return [
+      { role: 'system', content: sys.join('\n\n') },
+      { role: 'user', content: userPromptContent },
+    ]
+  }
 
+  let escalated = false
+  let candidateToolCount = dynamicSelection.definitions.length
   let agentResult
+
+  const maxStepsForChannel =
+    !opts.forceReply && !session.atMe
+      ? Math.min(ctx.config.agent_auto_max_steps, ctx.config.agent_max_tool_steps)
+      : ctx.config.agent_max_tool_steps
+
   try {
     agentResult = await runSocialAgentLoop({
       ctx,
       llm,
       conversationId,
-      messages,
-      allowTools,
-      policy: toolPolicy,
+      messages: buildMessages(canEscalate),
+      channel: activeChannel,
+      toolDefs: dynamicSelection.definitions,
+      externalDiscovered,
+      maxSteps: maxStepsForChannel,
+      deadlineMs: sharedDeadline,
       now,
       fetchImpl: opts.fetchImpl,
       random: opts.random,
     })
+
+    // 处理 Fast Chat 模型自主升级协议（单跳升级，共享同一预算与权限白名单）
+    if (canEscalate && activeChannel === 'fast') {
+      const directive = parseEscalationDirective(agentResult.text)
+      if (directive.action === 'silence') {
+        const routingLog: Omit<RoutingLogRecord, 'id' | 'day'> = {
+          groupId: conversationId,
+          channel: 'fast',
+          escalated: false,
+          matchedIntents: intent.matchedIntents,
+          candidateCount: 0,
+          toolCalls: 0,
+          toolFailures: 0,
+          falseTrigger: false,
+          latencyMs: Date.now() - startedAt,
+          tokens: agentResult.usage.inputTokens + agentResult.usage.outputTokens,
+          createdAt: now,
+        }
+        const bg = runPostPersist(ctx, session, state, mmState, settings, {
+          now,
+          stateDirty,
+          mmDirty,
+          shouldExtractMemory: decision.recordContext,
+          statsDelta,
+          llmUsage: agentResult.usage,
+          routingLog,
+        })
+        await scheduleBackground(ctx, bg, opts.awaitBackground)
+        return {
+          replied: false,
+          reason: 'model-chose-silence',
+          score: decision.score,
+          replyStyle: 'none',
+          channel: 'fast',
+          escalated: false,
+          candidateToolCount: 0,
+        }
+      }
+
+      if (directive.action === 'escalate' && sharedDeadline - Date.now() >= 3_000) {
+        escalated = true
+        const targetChannel: AgentChannel = directive.requestedTools.length >= 2 ? 'full' : 'smart'
+        const escSelection = selectDynamicTools({
+          channel: targetChannel,
+          catalog: availableCatalog,
+          intent,
+          text: `${userText} ${directive.reason}`,
+          topK: ctx.config.agent_candidate_top_k,
+          requestedToolIds: directive.requestedTools,
+        })
+        if (escSelection.definitions.length > 0) {
+          activeChannel = targetChannel
+          candidateToolCount = escSelection.definitions.length
+          const prevUsage = agentResult.usage
+          const escalatedRun = await runSocialAgentLoop({
+            ctx,
+            llm,
+            conversationId,
+            messages: buildMessages(false),
+            channel: activeChannel,
+            toolDefs: escSelection.definitions,
+            externalDiscovered,
+            maxSteps: maxStepsForChannel,
+            deadlineMs: sharedDeadline,
+            now,
+            fetchImpl: opts.fetchImpl,
+            random: opts.random,
+          })
+          agentResult = {
+            ...escalatedRun,
+            usage: {
+              runs: prevUsage.runs + escalatedRun.usage.runs,
+              toolCalls: prevUsage.toolCalls + escalatedRun.usage.toolCalls,
+              toolFailures: prevUsage.toolFailures + escalatedRun.usage.toolFailures,
+              inputTokens: prevUsage.inputTokens + escalatedRun.usage.inputTokens,
+              outputTokens: prevUsage.outputTokens + escalatedRun.usage.outputTokens,
+            },
+          }
+        }
+      } else if (directive.action === 'reply') {
+        agentResult.text = directive.text
+      }
+    }
   } catch (err) {
     ctx.logger.warn('Social Agent LLM 执行失败，已静默降级', {
       conversationId,
+      channel: activeChannel,
       error: err instanceof Error ? err.message : String(err),
     })
     const bg = runPostPersist(ctx, session, state, mmState, settings, {
@@ -445,11 +609,39 @@ export async function handleGroupChatEvent(
       statsDelta,
     })
     await scheduleBackground(ctx, bg, opts.awaitBackground)
-    return { replied: false, reason: 'llm-error', score: decision.score, replyStyle: 'none', visionUsed }
+    return {
+      replied: false,
+      reason: 'llm-error',
+      score: decision.score,
+      replyStyle: 'none',
+      visionUsed,
+      channel: activeChannel,
+      escalated,
+      candidateToolCount,
+    }
   }
 
   const parsedVoice = parseVoiceDirective(agentResult.text)
-  const replyText = parsedVoice.cleanText
+  let replyText = parsedVoice.cleanText
+
+  if (ctx.config.agent_show_tool_progress && agentResult.toolLogs.length > 0 && replyText) {
+    const names = [...new Set(agentResult.toolLogs.map((l) => l.toolId))].join('、')
+    replyText = `${replyText}\n（已参考：${names}）`
+  }
+
+  const routingLog: Omit<RoutingLogRecord, 'id' | 'day'> = {
+    groupId: conversationId,
+    channel: activeChannel,
+    escalated,
+    matchedIntents: intent.matchedIntents,
+    candidateCount: candidateToolCount,
+    toolCalls: agentResult.usage.toolCalls,
+    toolFailures: agentResult.usage.toolFailures,
+    falseTrigger: activeChannel !== 'fast' && !opts.forceReply && agentResult.usage.toolCalls === 0,
+    latencyMs: Date.now() - startedAt,
+    tokens: agentResult.usage.inputTokens + agentResult.usage.outputTokens,
+    createdAt: now,
+  }
 
   if (!replyText && agentResult.artifacts.length === 0) {
     const bg = runPostPersist(ctx, session, state, mmState, settings, {
@@ -460,9 +652,19 @@ export async function handleGroupChatEvent(
       statsDelta,
       llmUsage: agentResult.usage,
       toolLogs: agentResult.toolLogs,
+      routingLog,
     })
     await scheduleBackground(ctx, bg, opts.awaitBackground)
-    return { replied: false, reason: 'empty-reply', score: decision.score, replyStyle: 'none', visionUsed }
+    return {
+      replied: false,
+      reason: 'empty-reply',
+      score: decision.score,
+      replyStyle: 'none',
+      visionUsed,
+      channel: activeChannel,
+      escalated,
+      candidateToolCount,
+    }
   }
 
   if (replyText && containsBlockedKeyword(replyText, ctx.config.blocked_keywords)) {
@@ -475,12 +677,22 @@ export async function handleGroupChatEvent(
       statsDelta,
       llmUsage: agentResult.usage,
       toolLogs: agentResult.toolLogs,
+      routingLog,
     })
     await scheduleBackground(ctx, bg, opts.awaitBackground)
-    return { replied: false, reason: 'blocked-output', score: decision.score, replyStyle: 'none', visionUsed }
+    return {
+      replied: false,
+      reason: 'blocked-output',
+      score: decision.score,
+      replyStyle: 'none',
+      visionUsed,
+      channel: activeChannel,
+      escalated,
+      candidateToolCount,
+    }
   }
 
-  // 0. 若外部工具返回了图片附件（例如 t2i.render），优先直接发送「文字 + 工具图片」
+  // 0. 外部工具图片附件交付
   const toolImage = firstImageArtifact(agentResult.artifacts)
   if (toolImage) {
     let sendRes = await session.reply(replyText ? { text: replyText, image: toolImage } : { image: toolImage })
@@ -505,6 +717,7 @@ export async function handleGroupChatEvent(
       statsDelta,
       llmUsage: agentResult.usage,
       toolLogs: agentResult.toolLogs,
+      routingLog,
     })
     await scheduleBackground(ctx, bg, opts.awaitBackground)
     return {
@@ -516,6 +729,9 @@ export async function handleGroupChatEvent(
       visionUsed,
       usedAgentLoop: agentResult.usedAgentLoop,
       toolCallsCount: agentResult.usage.toolCalls,
+      channel: activeChannel,
+      escalated,
+      candidateToolCount,
     }
   }
 
@@ -584,6 +800,7 @@ export async function handleGroupChatEvent(
             voiceLog,
             llmUsage: agentResult.usage,
             toolLogs: agentResult.toolLogs,
+            routingLog,
           })
           await scheduleBackground(ctx, bg, opts.awaitBackground)
           return {
@@ -597,6 +814,9 @@ export async function handleGroupChatEvent(
             voiceCached: prepared.cached,
             usedAgentLoop: agentResult.usedAgentLoop,
             toolCallsCount: agentResult.usage.toolCalls,
+            channel: activeChannel,
+            escalated,
+            candidateToolCount,
           }
         }
 
@@ -625,9 +845,19 @@ export async function handleGroupChatEvent(
             voiceLog,
             llmUsage: agentResult.usage,
             toolLogs: agentResult.toolLogs,
+            routingLog,
           })
           await scheduleBackground(ctx, bg, opts.awaitBackground)
-          return { replied: false, reason: 'voice-send-failed', score: decision.score, replyStyle: 'none', visionUsed }
+          return {
+            replied: false,
+            reason: 'voice-send-failed',
+            score: decision.score,
+            replyStyle: 'none',
+            visionUsed,
+            channel: activeChannel,
+            escalated,
+            candidateToolCount,
+          }
         }
       } else {
         voiceLog = {
@@ -654,15 +884,25 @@ export async function handleGroupChatEvent(
             voiceLog,
             llmUsage: agentResult.usage,
             toolLogs: agentResult.toolLogs,
+            routingLog,
           })
           await scheduleBackground(ctx, bg, opts.awaitBackground)
-          return { replied: false, reason: 'tts-failed', score: decision.score, replyStyle: 'none', visionUsed }
+          return {
+            replied: false,
+            reason: 'tts-failed',
+            score: decision.score,
+            replyStyle: 'none',
+            visionUsed,
+            channel: activeChannel,
+            escalated,
+            candidateToolCount,
+          }
         }
       }
     }
   }
 
-  // 2. 文字 / 表情包回复路径（含语音失败降级）
+  // 2. 文字 / 表情包回复路径
   let replyStyle: ReplyStyle = 'text'
   let chosenMemeId: string | undefined
   let outgoing: OutgoingMessage = replyText
@@ -730,9 +970,19 @@ export async function handleGroupChatEvent(
       voiceLog,
       llmUsage: agentResult.usage,
       toolLogs: agentResult.toolLogs,
+      routingLog,
     })
     await scheduleBackground(ctx, bg, opts.awaitBackground)
-    return { replied: false, reason: 'send-failed', score: decision.score, replyStyle: 'none', visionUsed }
+    return {
+      replied: false,
+      reason: 'send-failed',
+      score: decision.score,
+      replyStyle: 'none',
+      visionUsed,
+      channel: activeChannel,
+      escalated,
+      candidateToolCount,
+    }
   }
 
   recordReplyRate(state, now)
@@ -763,6 +1013,7 @@ export async function handleGroupChatEvent(
     voiceLog,
     llmUsage: agentResult.usage,
     toolLogs: agentResult.toolLogs,
+    routingLog,
   })
   await scheduleBackground(ctx, bg, opts.awaitBackground)
 
@@ -777,5 +1028,8 @@ export async function handleGroupChatEvent(
     voiceUsed: false,
     usedAgentLoop: agentResult.usedAgentLoop,
     toolCallsCount: agentResult.usage.toolCalls,
+    channel: activeChannel,
+    escalated,
+    candidateToolCount,
   }
 }
