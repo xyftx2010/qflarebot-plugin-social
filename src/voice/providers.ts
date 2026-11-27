@@ -14,17 +14,39 @@ const DEFAULT_URLS: Readonly<Record<TTSProviderType, string>> = {
   openai: 'https://api.openai.com/v1/audio/speech',
 }
 
+const QWEN_SPEECH_SYNTH_PATH = '/api/v1/services/audio/tts/SpeechSynthesizer'
+const QWEN_MULTIMODAL_PATH = '/api/v1/services/aigc/multimodal-generation/generation'
+
 const MINIMAX_EMOTIONS = new Set(['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'calm'])
 
 export function contentTypeForAudio(format: VoiceAudioFormat): string {
   return format === 'mp3' ? 'audio/mpeg' : 'audio/wav'
 }
 
-export function resolveProviderEndpoint(provider: TTSProviderType, customBaseUrl: string): string {
+export function isQwenSpeechSynthesizerModel(model: string): boolean {
+  const m = model.trim().toLowerCase()
+  return m.startsWith('qwen-audio-') || m.startsWith('cosyvoice') || m.startsWith('sambert')
+}
+
+export function resolveProviderEndpoint(
+  provider: TTSProviderType,
+  customBaseUrl: string,
+  model = '',
+): string {
   const trimmed = customBaseUrl.trim()
-  if (!trimmed) return DEFAULT_URLS[provider]
+  if (!trimmed) {
+    if (provider === 'qwen' && isQwenSpeechSynthesizerModel(model)) {
+      return `https://dashscope.aliyuncs.com${QWEN_SPEECH_SYNTH_PATH}`
+    }
+    return DEFAULT_URLS[provider]
+  }
   if (provider === 'openai' && /\/v1\/?$/i.test(trimmed)) {
     return `${trimmed.replace(/\/+$/, '')}/audio/speech`
+  }
+  if (provider === 'qwen' && !/\/services\//i.test(trimmed)) {
+    const base = trimmed.replace(/\/(?:compatible-mode\/v1|api\/v1)\/?$/i, '').replace(/\/+$/, '')
+    const path = isQwenSpeechSynthesizerModel(model) ? QWEN_SPEECH_SYNTH_PATH : QWEN_MULTIMODAL_PATH
+    return `${base}${path}`
   }
   return trimmed
 }
@@ -146,16 +168,29 @@ async function synthesizeQwen(
   endpoint: string,
   fetchImpl: typeof fetch,
 ): Promise<VoiceSynthesisResult> {
-  const body = {
-    model: req.model || 'qwen-tts',
-    input: {
-      text: req.text,
-      voice: req.voiceId || 'Cherry',
-    },
-    parameters: {
-      format: req.format,
-    },
-  }
+  const model = req.model || 'qwen-tts'
+  const isSpeechSynth = isQwenSpeechSynthesizerModel(model) || /SpeechSynthesizer/i.test(endpoint)
+
+  const body = isSpeechSynth
+    ? {
+        model,
+        input: {
+          text: req.text,
+          voice: req.voiceId || 'longanhuan_v3.1',
+          format: req.format,
+          sample_rate: 24000,
+        },
+      }
+    : {
+        model,
+        input: {
+          text: req.text,
+          voice: req.voiceId || 'Cherry',
+        },
+        parameters: {
+          format: req.format,
+        },
+      }
 
   const res = await fetchImpl(endpoint, {
     method: 'POST',
@@ -173,7 +208,7 @@ async function synthesizeQwen(
   }
 
   const ct = res.headers.get('content-type') ?? ''
-  if (ct.startsWith('audio/')) {
+  if (ct.startsWith('audio/') || ct.startsWith('application/octet-stream')) {
     const bytes = await res.arrayBuffer()
     if (bytes.byteLength === 0) throw new Error('千问 TTS 返回空音频')
     return { bytes, format: req.format, contentType: contentTypeForAudio(req.format), sizeBytes: bytes.byteLength }
@@ -182,19 +217,25 @@ async function synthesizeQwen(
   const json = (await res.json()) as {
     code?: string
     message?: string
-    output?: { audio?: { url?: string; data?: string } }
+    output?: { audio?: { url?: string; data?: string } | string; audio_url?: string }
   }
   if (json.code) {
     throw new Error(`千问 TTS 业务错误（${json.code}）：${json.message ?? ''}`)
   }
   const audio = json.output?.audio
   let bytes: ArrayBuffer
-  if (audio?.data) {
+  if (typeof audio === 'string' && audio.trim()) {
+    bytes = /^https?:\/\//i.test(audio.trim())
+      ? await fetchAudioFromUrl(audio.trim(), req.timeoutMs, fetchImpl)
+      : base64ToArrayBuffer(audio)
+  } else if (typeof audio === 'object' && audio?.data) {
     bytes = base64ToArrayBuffer(audio.data)
-  } else if (audio?.url) {
+  } else if (typeof audio === 'object' && audio?.url) {
     bytes = await fetchAudioFromUrl(audio.url, req.timeoutMs, fetchImpl)
+  } else if (json.output?.audio_url) {
+    bytes = await fetchAudioFromUrl(json.output.audio_url, req.timeoutMs, fetchImpl)
   } else {
-    throw new Error('千问 TTS 响应缺少 output.audio.url 或 data')
+    throw new Error('千问 TTS 响应缺少音频地址或数据')
   }
 
   if (bytes.byteLength === 0) throw new Error('千问 TTS 音频为空')
@@ -262,7 +303,7 @@ export async function synthesizeSpeech(
   if (!req.text.trim()) {
     throw new Error('TTS 合成文本不能为空')
   }
-  const endpoint = resolveProviderEndpoint(req.provider, req.apiBaseUrl)
+  const endpoint = resolveProviderEndpoint(req.provider, req.apiBaseUrl, req.model)
   const invalid = validateImageUrl(endpoint)
   if (invalid) {
     throw new Error(`TTS 接口地址无效：${invalid}`)

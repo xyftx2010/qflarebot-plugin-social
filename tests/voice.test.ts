@@ -57,9 +57,10 @@ describe('voice: TTS providers, smart decision, cache, fallback & admin overview
     expect(mmRes.sizeBytes).toBe(sampleWav.byteLength)
     expect(mmRes.contentType).toBe('audio/wav')
 
-    // 2. Qwen DashScope URL download
+    // 2. Qwen DashScope URL download (multimodal-generation)
     const fetchQwen = vi.fn(async (url: string) => {
       if (url.includes('dashscope')) {
+        expect(url).toContain('/services/aigc/multimodal-generation/generation')
         return Response.json({ output: { audio: { url: 'https://cdn.example.com/qwen.wav' } } })
       }
       return new Response(sampleWav, { status: 200, headers: { 'content-type': 'audio/wav' } })
@@ -83,6 +84,35 @@ describe('voice: TTS providers, smart decision, cache, fallback & admin overview
       fetchQwen,
     )
     expect(qwenRes.sizeBytes).toBe(sampleWav.byteLength)
+
+    // 2b. Qwen qwen-audio-3.1-tts-plus auto-routes to SpeechSynthesizer
+    const fetchQwenAudio = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe('https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer')
+      const body = JSON.parse(String(init?.body)) as { model: string; input: { voice: string; format: string } }
+      expect(body.model).toBe('qwen-audio-3.1-tts-plus')
+      expect(body.input.voice).toBe('longanhuan_v3.1')
+      expect(body.input.format).toBe('wav')
+      return new Response(sampleWav, { status: 200, headers: { 'content-type': 'audio/wav' } })
+    }) as unknown as typeof fetch
+
+    const qwenAudioRes = await synthesizeSpeech(
+      {
+        text: '龙安欢语音测试',
+        provider: 'qwen',
+        apiBaseUrl: '',
+        apiKey: 'sk-qwen',
+        model: 'qwen-audio-3.1-tts-plus',
+        voiceId: 'longanhuan_v3.1',
+        speed: 1,
+        pitch: 0,
+        volume: 1,
+        emotion: '',
+        format: 'wav',
+        timeoutMs: 5000,
+      },
+      fetchQwenAudio,
+    )
+    expect(qwenAudioRes.sizeBytes).toBe(sampleWav.byteLength)
 
     // 3. OpenAI Compatible TTS (/v1 suffix auto-appends /audio/speech)
     const fetchOpenAI = vi.fn(async (url: string) => {
