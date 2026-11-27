@@ -1,7 +1,7 @@
 import type { PluginDB } from '@qqbot/sdk'
 import type { CorpusRecord, LearningSourceType } from './types.js'
 import { anonymizeSenderId, computeContentHash, evaluateAndCleanCorpus } from './cleaner.js'
-import { hasCorpusContentHash, insertCorpusBatch, upsertLearningSource } from '../store/learning-db.js'
+import { findExistingCorpusHashes, insertCorpusBatch, upsertLearningSource } from '../store/learning-db.js'
 
 export interface RawImportRow {
   sender: string
@@ -312,7 +312,13 @@ export async function importCorpusChunk(input: ImportChunkInput): Promise<Import
   const retentionMs = Math.max(1, Math.min(180, input.retentionDays || 30)) * 86_400_000
   const expiresAt = now + retentionMs
 
-  const records: CorpusRecord[] = []
+  const candidates: Array<{
+    row: RawImportRow
+    cleanedContent: string
+    qualityScore: number
+    learningStatus: 'pending' | 'review' | 'excluded'
+    contentHash: string
+  }> = []
   const localHashes = new Set<string>()
   const skipReasons: Record<string, number> = {}
   let duplicateRows = 0
@@ -339,30 +345,51 @@ export async function importCorpusChunk(input: ImportChunkInput): Promise<Import
     }
 
     const contentHash = await computeContentHash(input.groupId, evalRes.cleanedContent, row.timestamp)
-    if (localHashes.has(contentHash) || (await hasCorpusContentHash(input.db, input.groupId, contentHash))) {
+    if (localHashes.has(contentHash)) {
       duplicateRows += 1
       skipReasons.duplicate = (skipReasons.duplicate ?? 0) + 1
       continue
     }
     localHashes.add(contentHash)
+    candidates.push({
+      row,
+      cleanedContent: evalRes.cleanedContent,
+      qualityScore: evalRes.qualityScore,
+      learningStatus: evalRes.learningStatus,
+      contentHash,
+    })
+  }
 
-    const pseudoSender = await anonymizeSenderId(input.groupId, row.sender)
+  const existingHashes = await findExistingCorpusHashes(
+    input.db,
+    input.groupId,
+    candidates.map((c) => c.contentHash),
+  )
+
+  const records: CorpusRecord[] = []
+  for (const cand of candidates) {
+    if (existingHashes.has(cand.contentHash)) {
+      duplicateRows += 1
+      skipReasons.duplicate = (skipReasons.duplicate ?? 0) + 1
+      continue
+    }
+    const pseudoSender = await anonymizeSenderId(input.groupId, cand.row.sender)
     const rec: CorpusRecord = {
       corpusId: `cor_${crypto.randomUUID().replace(/-/g, '').slice(0, 14)}`,
       groupId: input.groupId,
       sourceId,
       sourceType,
       pseudonymousSenderId: pseudoSender,
-      messageId: row.messageId ?? '',
-      timestamp: row.timestamp,
+      messageId: cand.row.messageId ?? '',
+      timestamp: cand.row.timestamp,
       messageType: 'text',
-      content: evalRes.cleanedContent,
-      replyTo: row.replyTo ?? '',
-      mentions: row.mentions ?? [],
+      content: cand.cleanedContent,
+      replyTo: cand.row.replyTo ?? '',
+      mentions: cand.row.mentions ?? [],
       consentStatus: 'authorized',
-      contentHash,
-      qualityScore: evalRes.qualityScore,
-      learningStatus: evalRes.learningStatus,
+      contentHash: cand.contentHash,
+      qualityScore: cand.qualityScore,
+      learningStatus: cand.learningStatus,
       createdAt: now,
       expiresAt,
     }

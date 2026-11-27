@@ -22,15 +22,15 @@ import {
 const VISION_WINDOW_MS = 60_000
 
 const VISION_SYSTEM_PROMPT = [
-  '你是一个 QQ 群聊图片理解助手，负责客观、简明地分析群友发的图片、截图或表情包。',
-  '请输出一个纯 JSON 对象（不要额外解释），包含以下字段：',
-  '- summary: 用 1~2 句中文概括图片画面内容（不超过 80 字）',
-  '- ocrText: 图片或截图中清晰可见的关键文字（没有就填空字符串，不超过 120 字）',
-  '- memeMeaning: 如果是表情包，说明它表达的梗或情绪（不是表情包填空字符串）',
+  '你是一个高精度的 QQ 群聊图片理解助手，负责准确、完整地解读群友发的图片、截图、照片或表情包。',
+  '请输出一个纯 JSON 对象（不要 Markdown 代码块，不要额外解释），包含以下字段：',
+  '- summary: 用 2~3 句中文清晰描述画面主体、细节、人物动作/场景或截图核心内容（不超过 200 字）',
+  '- ocrText: 准确提取图片或截图中的所有关键文字（没有就填空字符串，不超过 360 字）',
+  '- memeMeaning: 如果是表情包，说明它表达的梗、反讽或情绪（不是表情包填空字符串）',
   '- mood: 情绪关键词（如 开心/无语/震惊/搞笑/摆烂/委屈/吐槽/日常）',
   '- tags: 3~6 个简短中文标签数组（用于后续搜索和匹配）',
-  '- sceneHints: 适合在什么聊天场景使用（不超过 40 字）',
-  '隐私规则：不要猜测或推断人物的真实姓名、年龄、住址、手机号等敏感个人属性。',
+  '- sceneHints: 适合在什么聊天场景使用（不超过 50 字）',
+  '隐私规则：不要猜测或推断人物的真实姓名、住址、手机号等敏感个人属性；如果图片本身清晰可读，请如实描述，不要随意说“看不清”。',
 ].join('\n')
 
 export function isVisionRateLimited(
@@ -79,22 +79,45 @@ export function parseVisionResponse(raw: string, hash: string): Omit<ImageAnalys
             .map((t) => sanitizeSensitiveText(t.trim()).text.slice(0, 16))
             .slice(0, 8)
         : []
-      const summary = str('summary', 120) || str('memeMeaning', 120) || '一张群聊图片'
+      const summary = str('summary', 240) || str('memeMeaning', 200) || '一张群聊图片'
       return {
         hash,
         summary,
-        ocrText: str('ocrText', 160),
-        memeMeaning: str('memeMeaning', 100),
+        ocrText: str('ocrText', 400),
+        memeMeaning: str('memeMeaning', 160),
         mood: str('mood', 24) || '日常',
         tags: rawTags,
-        sceneHints: str('sceneHints', 80),
+        sceneHints: str('sceneHints', 100),
       }
     } catch {
-      // 回落纯文本解析
+      // 回落残缺 JSON 字段提取或纯文本解析
     }
   }
 
-  const clean = sanitizeSensitiveText(trimmed).text.slice(0, 120)
+  // 若模型输出被截断（缺少闭合 }），尽量正则挽救已生成的字段，避免把原始 {"summary":... 泄漏出去
+  const partialStr = (key: string, maxLen: number): string => {
+    const m = unwrapped.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`))
+    if (!m?.[1]) return ''
+    const decoded = m[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim()
+    return sanitizeSensitiveText(decoded).text.slice(0, maxLen)
+  }
+  const partialSummary = partialStr('summary', 240)
+  const partialOcr = partialStr('ocrText', 400)
+  const partialMeme = partialStr('memeMeaning', 160)
+  const partialMood = partialStr('mood', 24)
+  if (partialSummary || partialOcr || partialMeme) {
+    return {
+      hash,
+      summary: partialSummary || partialMeme || '一张群聊图片',
+      ocrText: partialOcr,
+      memeMeaning: partialMeme,
+      mood: partialMood || '日常',
+      tags: [],
+      sceneHints: partialStr('sceneHints', 100),
+    }
+  }
+
+  const clean = sanitizeSensitiveText(trimmed).text.slice(0, 220)
   return {
     hash,
     summary: clean || '一张群聊图片',
@@ -182,7 +205,7 @@ export async function analyzeDownloadedImage(
           type: 'image',
           data: image.base64,
           media_type: image.contentType,
-          detail: 'low',
+          detail: 'high',
         },
       ],
     },
@@ -193,8 +216,8 @@ export async function analyzeDownloadedImage(
       model: alias,
       messages,
       temperature: 0.2,
-      max_tokens: 260,
-      timeout_ms: ctx.config.vision_timeout_ms,
+      max_tokens: 600,
+      timeout_ms: Math.max(12_000, ctx.config.vision_timeout_ms),
     })
     if (opts.mmState) recordVisionRate(opts.mmState, now)
     const parsed = parseVisionResponse(res.text ?? '', image.hash)

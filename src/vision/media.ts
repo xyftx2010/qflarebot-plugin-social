@@ -1,9 +1,9 @@
 import type { Attachment, Session } from '@qqbot/sdk'
 
 const MAX_REDIRECTS = 3
-const DEFAULT_TIMEOUT_MS = 5_000
-const DEFAULT_MAX_BYTES = 800_000
-export const MAX_TOTAL_IMAGE_BYTES = 1_500_000
+const DEFAULT_TIMEOUT_MS = 8_000
+const DEFAULT_MAX_BYTES = 3_000_000
+export const MAX_TOTAL_IMAGE_BYTES = 4_500_000
 
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp)(?:[?#]|$)/i
 

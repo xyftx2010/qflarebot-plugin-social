@@ -201,6 +201,28 @@ export async function hasCorpusContentHash(db: PluginDB, groupId: string, conten
   return Boolean(row)
 }
 
+/** 批量查询已存在的 content_hash，避免导入时逐条 SELECT 触发 Workers 子请求上限 */
+export async function findExistingCorpusHashes(
+  db: PluginDB,
+  groupId: string,
+  hashes: readonly string[],
+): Promise<Set<string>> {
+  const existing = new Set<string>()
+  if (hashes.length === 0) return existing
+  const unique = [...new Set(hashes)]
+  for (let i = 0; i < unique.length; i += 50) {
+    const slice = unique.slice(i, i + 50)
+    const placeholders = slice.map(() => '?').join(', ')
+    const rows = await db.all<{ content_hash: string }>(
+      `SELECT content_hash FROM {learning_corpus} WHERE group_id = ? AND content_hash IN (${placeholders})`,
+      groupId,
+      ...slice,
+    )
+    for (const r of rows) existing.add(r.content_hash)
+  }
+  return existing
+}
+
 export async function insertCorpusBatch(db: PluginDB, records: readonly CorpusRecord[]): Promise<void> {
   if (records.length === 0) return
   // 分批使用 db.batch 避免单次语句过多

@@ -1156,6 +1156,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
       importAbortFlag = false
       btnImport.disabled = true
       btnStop.style.display = 'inline-block'
+      statusEl.textContent = '正在准备流式读取文件（' + Math.round(file.size / 1024 / 1024) + 'MB）...'
 
       try {
         const fileSize = file.size
@@ -1185,6 +1186,9 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
             sourceId = out.sourceId
             totalAccepted += out.acceptedRows || 0
             totalSkipped += out.skippedRows || 0
+            const pctNow = Math.min(100, Math.round(((offset - startOffset) / Math.max(1, fileSize - startOffset)) * 100))
+            statusEl.textContent =
+              '流式分块导入中（' + pctNow + '%）… 已入库 ' + totalAccepted + ' 条，过滤/去重 ' + totalSkipped + ' 条'
             if (maxRows > 0 && totalAccepted >= maxRows) {
               importAbortFlag = true
               break
@@ -1206,6 +1210,9 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
             sourceId = out.sourceId
             totalAccepted += out.acceptedRows || 0
             totalSkipped += out.skippedRows || 0
+            const pctNow = Math.min(100, Math.round(((offset - startOffset) / Math.max(1, fileSize - startOffset)) * 100))
+            statusEl.textContent =
+              '流式分块导入中（' + pctNow + '%）… 已入库 ' + totalAccepted + ' 条，过滤/去重 ' + totalSkipped + ' 条'
             if (maxRows > 0 && totalAccepted >= maxRows) {
               importAbortFlag = true
               break

@@ -27,9 +27,9 @@ export const defaultConfig: SocialConfig = {
   enable_vision: true,
   vision_rate_limit_per_minute: 4,
   max_vision_images: 2,
-  max_image_bytes: 800_000,
+  max_image_bytes: 3_000_000,
   image_cache_ttl_hours: 72,
-  vision_timeout_ms: 10_000,
+  vision_timeout_ms: 15_000,
 
   enable_meme_reply: true,
   meme_send_probability: 0.35,
@@ -281,10 +281,10 @@ export const configSchema: JsonSchema = {
     max_image_bytes: {
       type: 'integer',
       title: '单张图片体积上限（字节）',
-      description: '默认 800000（约 800 KB），避免超大图触发 Worker 10ms CPU 或内存上限。',
+      description: '默认 3000000（约 3 MB），兼容高清手机截图与照片。',
       minimum: 50000,
-      maximum: 2000000,
-      default: 800000,
+      maximum: 5000000,
+      default: 3000000,
       'x-showIf': { enable_vision: true },
     },
     image_cache_ttl_hours: {
@@ -299,10 +299,10 @@ export const configSchema: JsonSchema = {
     vision_timeout_ms: {
       type: 'integer',
       title: '视觉模型调用超时（毫秒）',
-      description: '超时后自动降级为纯文本回复，不阻塞整条消息。',
+      description: '高清看图建议 15000ms；超时后自动降级为纯文本回复，不阻塞整条消息。',
       minimum: 3000,
-      maximum: 18000,
-      default: 10000,
+      maximum: 22000,
+      default: 15000,
       'x-showIf': { enable_vision: true },
     },
 
